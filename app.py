@@ -3,16 +3,18 @@ import streamlit as st
 import os
 import openai
 from PIL import Image
+import io
+
+# OCR 库
+import pytesseract
+from pdf2image import convert_from_bytes
 
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 
 st.title("🧠 AI-Driven Personalized Cancer Care Chatbot")
-st.write(
-    "Upload a medical report or paste a short test/result. Click Generate to get: "
-    "health summary, doctor questions, and tailored nutrition advice."
-)
+st.write("Upload a medical report (JPG/PNG/PDF) or paste a short test/result. Click Generate to get health summary, doctor questions, and nutrition advice.")
 
-# === API key setup ===
+# OpenAI API key
 OPENAI_API_KEY = None
 try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -20,48 +22,48 @@ except Exception:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not OPENAI_API_KEY:
-    api_key_input = st.text_input(
-        "Paste your OpenAI API key for this session (will not be saved):",
-        type="password"
-    )
+    st.warning("OpenAI API key not found. Add OPENAI_API_KEY in Streamlit Secrets.")
+    api_key_input = st.text_input("Or paste your OpenAI API key for this session (will not be saved):", type="password")
     if api_key_input:
         OPENAI_API_KEY = api_key_input
 
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
-else:
-    st.warning("OpenAI API key not configured. Add it to Streamlit Secrets or input above.")
 
-# === Input area ===
+# Input area
 st.subheader("1) Input report or summary")
-uploaded_file = st.file_uploader(
-    "Upload a medical report (JPG/PNG/PDF) — optional for now",
-    type=["jpg", "jpeg", "png", "pdf"]
-)
-text_input = st.text_area(
-    "Or paste a short report / lab excerpt here (e.g., 'WBC low, Hb normal, fasting glucose 7.2 mmol/L')",
-    height=160
-)
+uploaded_file = st.file_uploader("Upload a medical report (JPG/PNG/PDF)", type=["jpg","jpeg","png","pdf"])
+text_input = st.text_area("Or paste a short report / lab excerpt here", height=160)
 
-# Image preview (OCR not implemented yet)
+ocr_text = ""
 if uploaded_file:
     try:
         if uploaded_file.type.startswith("image"):
             image = Image.open(uploaded_file)
             st.image(image, caption="Uploaded report (preview)", use_column_width=True)
+            ocr_text = pytesseract.image_to_string(image, lang='eng+chi_sim')
+        elif uploaded_file.type == "application/pdf":
+            pages = convert_from_bytes(uploaded_file.read())
+            for page in pages:
+                ocr_text += pytesseract.image_to_string(page, lang='eng+chi_sim') + "\n"
         else:
-            st.write("Uploaded file received (preview not available for PDFs in this demo).")
+            st.warning("Unsupported file type for OCR.")
     except Exception as e:
-        st.write("Preview error:", e)
+        st.error(f"OCR processing failed: {e}")
+
+# 如果 OCR 有结果，自动填入 text_input
+if ocr_text.strip():
+    text_input = ocr_text
+    st.text_area("OCR extracted text (editable)", value=text_input, height=160)
 
 input_source = text_input.strip() if text_input.strip() else None
 
-# === Generate button ===
+# Action button
 if st.button("Generate Summary & Recommendations"):
     if not input_source:
-        st.error("Please paste a short report excerpt in the text box (or enable OCR).")
+        st.error("Please provide a report text or upload an OCR-compatible file.")
     elif not OPENAI_API_KEY:
-        st.error("OpenAI API key not configured. Add it to Streamlit Secrets or input above.")
+        st.error("OpenAI API key not configured.")
     else:
         with st.spinner("Generating..."):
             prompt = f"""
@@ -82,18 +84,15 @@ Nutrition:
 - ...
 Keep language simple and actionable for elderly patients and family.
 """
-
             try:
-                # === 新版 openai>=1.0.0 接口 ===
-                resp = openai.chat.completions.create(
+                resp = openai.ChatCompletion.create(
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=500,
                     temperature=0.2
                 )
-                ai_text = resp.choices[0].message.content
+                ai_text = resp["choices"][0]["message"]["content"]
 
-                # 显示结果
                 st.subheader("🧾 Health Summary")
                 if "Summary:" in ai_text:
                     summary = ai_text.split("Summary:")[1].split("Questions:")[0].strip()
@@ -117,3 +116,4 @@ Keep language simple and actionable for elderly patients and family.
 
             except Exception as e:
                 st.error(f"OpenAI API call failed: {e}")
+
