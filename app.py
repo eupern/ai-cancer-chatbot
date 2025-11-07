@@ -3,16 +3,15 @@ import streamlit as st
 import os
 import openai
 from PIL import Image
-import io
-
-# OCR 库
-import pytesseract
 from pdf2image import convert_from_bytes
+import pytesseract
 
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 
 st.title("🧠 AI-Driven Personalized Cancer Care Chatbot")
-st.write("Upload a medical report (JPG/PNG/PDF) or paste a short test/result. Click Generate to get health summary, doctor questions, and nutrition advice.")
+st.write(
+    "Upload a medical report (JPG/PNG/PDF) or paste a short test/result. Click Generate to get health summary, doctor questions, and nutrition advice."
+)
 
 # OpenAI API key
 OPENAI_API_KEY = None
@@ -23,7 +22,10 @@ except Exception:
 
 if not OPENAI_API_KEY:
     st.warning("OpenAI API key not found. Add OPENAI_API_KEY in Streamlit Secrets.")
-    api_key_input = st.text_input("Or paste your OpenAI API key for this session (will not be saved):", type="password")
+    api_key_input = st.text_input(
+        "Or paste your OpenAI API key for this session (will not be saved to GitHub):",
+        type="password"
+    )
     if api_key_input:
         OPENAI_API_KEY = api_key_input
 
@@ -32,9 +34,10 @@ if OPENAI_API_KEY:
 
 # Input area
 st.subheader("1) Input report or summary")
-uploaded_file = st.file_uploader("Upload a medical report (JPG/PNG/PDF)", type=["jpg","jpeg","png","pdf"])
+uploaded_file = st.file_uploader("Upload a medical report (JPG/PNG/PDF)", type=["jpg", "jpeg", "png", "pdf"])
 text_input = st.text_area("Or paste a short report / lab excerpt here", height=160)
 
+# OCR extraction
 ocr_text = ""
 if uploaded_file:
     try:
@@ -54,7 +57,7 @@ if uploaded_file:
 # 如果 OCR 有结果，自动填入 text_input
 if ocr_text.strip():
     text_input = ocr_text
-    st.text_area("OCR extracted text (editable)", value=text_input, height=160)
+    text_input = st.text_area("OCR extracted text (editable)", value=text_input, height=160)
 
 input_source = text_input.strip() if text_input.strip() else None
 
@@ -85,7 +88,7 @@ Nutrition:
 Keep language simple and actionable for elderly patients and family.
 """
             try:
-                resp = openai.ChatCompletion.create(
+                resp = openai.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=500,
@@ -116,4 +119,5 @@ Keep language simple and actionable for elderly patients and family.
 
             except Exception as e:
                 st.error(f"OpenAI API call failed: {e}")
+
 
