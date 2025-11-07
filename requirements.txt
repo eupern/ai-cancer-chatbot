@@ -1,8 +1,11 @@
 streamlit
 openai
 pillow
-pytesseract
 pdf2image
+easyocr
+torch
+numpy
+
 
 
 
