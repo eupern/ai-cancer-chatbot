@@ -4,7 +4,11 @@ import os
 import openai
 from PIL import Image
 from pdf2image import convert_from_bytes
-import pytesseract
+import numpy as np
+import easyocr
+
+# 初始化 EasyOCR
+reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
 
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 
@@ -37,18 +41,20 @@ st.subheader("1) Input report or summary")
 uploaded_file = st.file_uploader("Upload a medical report (JPG/PNG/PDF)", type=["jpg", "jpeg", "png", "pdf"])
 text_input = st.text_area("Or paste a short report / lab excerpt here", height=160)
 
-# OCR extraction
+# OCR extraction using EasyOCR
 ocr_text = ""
 if uploaded_file:
     try:
         if uploaded_file.type.startswith("image"):
             image = Image.open(uploaded_file)
             st.image(image, caption="Uploaded report (preview)", use_column_width=True)
-            ocr_text = pytesseract.image_to_string(image, lang='eng+chi_sim')
+            result = reader.readtext(np.array(image), detail=0)
+            ocr_text = "\n".join(result)
         elif uploaded_file.type == "application/pdf":
             pages = convert_from_bytes(uploaded_file.read())
             for page in pages:
-                ocr_text += pytesseract.image_to_string(page, lang='eng+chi_sim') + "\n"
+                result = reader.readtext(np.array(page), detail=0)
+                ocr_text += "\n".join(result) + "\n"
         else:
             st.warning("Unsupported file type for OCR.")
     except Exception as e:
@@ -119,5 +125,7 @@ Keep language simple and actionable for elderly patients and family.
 
             except Exception as e:
                 st.error(f"OpenAI API call failed: {e}")
+
+
 
 
