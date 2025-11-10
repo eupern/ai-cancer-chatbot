@@ -2,9 +2,10 @@ streamlit
 openai
 pillow
 pdf2image
-numpy
 easyocr
 torch
+numpy
+twilio
 
 
 
