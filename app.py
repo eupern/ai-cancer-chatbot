@@ -6,9 +6,9 @@ from PIL import Image
 from pdf2image import convert_from_bytes
 import numpy as np
 import easyocr
+import re
 
 # Initialize EasyOCR reader (Simplified Chinese + English)
-# GPU disabled for Streamlit Cloud compatibility
 reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
 
 # Streamlit page config
@@ -16,28 +16,24 @@ st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layo
 
 st.title("🧠 AI-Driven Personalized Cancer Care Chatbot")
 st.write(
-    "Upload a medical report (JPG/PNG/PDF) or paste a short test/result. Click Generate to get a health summary, suggested doctor questions, and nutrition advice."
+    "Upload a medical report (JPG/PNG/PDF) or paste a short test/result. Click Generate to get a health summary, suggested doctor questions, nutrition advice, and a health index."
 )
 
 # ===== OpenAI API key and client setup =====
 OPENAI_API_KEY = None
 try:
-    # Reads secret from Streamlit Secrets (recommended on Streamlit Cloud)
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 except Exception:
-    # fallback: environment variable (useful for local testing)
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Allow manual input for quick testing (not stored in GitHub)
 if not OPENAI_API_KEY:
-    st.warning("OpenAI API key not found in Streamlit Secrets. Add OPENAI_API_KEY in Secrets or paste a key below for a quick test.")
+    st.warning("OpenAI API key not found. Add OPENAI_API_KEY in Secrets or paste a key below for a quick test.")
     api_key_input = st.text_input("Paste your OpenAI API key for this session (not saved):", type="password")
     if api_key_input:
         OPENAI_API_KEY = api_key_input
 
 client = None
 if OPENAI_API_KEY:
-    # Create the OpenAI client for openai>=1.0.0
     client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ===== Input UI =====
@@ -50,13 +46,11 @@ ocr_text = ""
 if uploaded_file:
     try:
         if uploaded_file.type.startswith("image"):
-            # Show preview and run OCR on the image
             image = Image.open(uploaded_file)
             st.image(image, caption="Uploaded report (preview)", use_column_width=True)
             result = reader.readtext(np.array(image), detail=0)
             ocr_text = "\n".join(result)
         elif uploaded_file.type == "application/pdf":
-            # Convert PDF pages to images and run OCR page by page
             pages = convert_from_bytes(uploaded_file.read())
             for page in pages:
                 page_arr = np.array(page)
@@ -65,25 +59,68 @@ if uploaded_file:
         else:
             st.warning("Uploaded file type is not supported for OCR.")
     except Exception as e:
-        # Show OCR error details so you can debug (e.g., missing poppler)
         st.error(f"OCR processing failed: {e}")
 
 # If OCR found text, present it in an editable text area
 if ocr_text.strip():
     text_input = st.text_area("OCR extracted text (editable)", value=ocr_text, height=200)
 
-# Decide which text to send to the model
 input_source = text_input.strip() if text_input and text_input.strip() else None
 
+# ===== Health Index calculation function =====
+def calculate_health_index(report_text):
+    """
+    Extracts some common lab values and computes a simple health score 0-100.
+    This is an example; you can extend it with more indicators.
+    """
+    score = 0
+    indicators = {
+        "Glucose": (70, 140),     # normal range
+        "WBC": (4, 10),           # x10^9/L
+        "Hb": (12, 16),           # g/dL
+        "Platelets": (150, 400)   # x10^9/L
+    }
+    found_values = {}
+    for key, (low, high) in indicators.items():
+        # Simple regex to find numbers after indicator names
+        match = re.search(rf"{key}[:\s]*([\d\.]+)", report_text, re.IGNORECASE)
+        if match:
+            val = float(match.group(1))
+            found_values[key] = val
+            # linear scaling: 0 if below low, 10 if above high, proportionally in between
+            if val < low:
+                score += 0
+            elif val > high:
+                score += 10
+            else:
+                score += int(10 * (val - low) / (high - low))
+        else:
+            # missing indicator: assign neutral 5
+            score += 5
+    # Average across indicators
+    health_score = int(score / len(indicators) * 10)  # scale to 0-100
+    if health_score >= 80:
+        status = "Good"
+    elif health_score >= 50:
+        status = "Moderate"
+    else:
+        status = "Low"
+    return health_score, status, found_values
+
 # ===== Button: call OpenAI model =====
-if st.button("Generate Summary & Recommendations"):
+if st.button("Generate Summary, Health Index & Recommendations"):
     if not input_source:
         st.error("Please paste a short report excerpt or upload an OCR-compatible file first.")
     elif not client:
         st.error("OpenAI client not configured. Please set OPENAI_API_KEY in Streamlit Secrets or paste it above.")
     else:
+        with st.spinner("Calculating health index..."):
+            health_score, health_status, found_values = calculate_health_index(input_source)
+            st.subheader("📊 Health Index")
+            st.metric(label="Overall Health Score", value=f"{health_score}/100", delta=health_status)
+            st.write("Detected lab values:", found_values)
+
         with st.spinner("Generating AI output..."):
-            # Prompt instructs the model to produce labelled sections
             prompt = f"""
 You are a clinical-support assistant. Given the patient's report text below, produce:
 1) A concise health summary in plain language (3-4 short sentences).
@@ -92,6 +129,8 @@ You are a clinical-support assistant. Given the patient's report text below, pro
 
 Patient report:
 \"\"\"{input_source}\"\"\"
+
+Health index: {health_score}/100
 
 Output format (use these labels):
 Summary:
@@ -104,7 +143,6 @@ Keep the language simple and suitable for elderly patients and family members.
 """
 
             try:
-                # Use the new OpenAI client API (compatible with openai>=1.0.0)
                 resp = client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": prompt}],
@@ -112,21 +150,16 @@ Keep the language simple and suitable for elderly patients and family members.
                     temperature=0.2
                 )
 
-                # ===== Robust extraction of model text across SDK versions =====
                 ai_text = ""
-                # Preferred: new SDK object access
                 try:
                     ai_text = resp.choices[0].message.content
                 except Exception:
                     try:
-                        # fallback for dict-like return shapes
                         ai_text = resp["choices"][0]["message"]["content"]
                     except Exception:
                         try:
-                            # some older shapes
                             ai_text = resp.choices[0].text
                         except Exception:
-                            # last-resort fallback: stringify full response
                             ai_text = str(resp)
 
                 # ===== Display parsed sections =====
@@ -148,31 +181,9 @@ Keep the language simple and suitable for elderly patients and family members.
                     except Exception:
                         st.write("Questions section parse error; see full output below.")
                 else:
-                    st.write("No clearly labeled 'Questions:' section detected. See full output below.")
+                    st.write("No clearly labeled 'Questions:' section detected. S
 
-                st.subheader("🥗 Nutrition Recommendations")
-                if "Nutrition:" in ai_text:
-                    try:
-                        nutrition = ai_text.split("Nutrition:")[1].strip()
-                        st.write(nutrition)
-                    except Exception:
-                        st.write("Nutrition section parse error; see full output below.")
-                else:
-                    st.write("No clearly labeled 'Nutrition:' section detected. See full output below.")
 
-                # Expandable raw output for debugging and review
-                with st.expander("Full AI output (raw)"):
-                    st.code(ai_text)
-
-            except Exception as e:
-                # Show clear error message for debugging
-                st.error(f"OpenAI API call failed: {e}")
-                # Optionally print more detail to the logs (helpful during debugging)
-                st.write("---")
-                st.write("If this is an authentication or usage error, check the following:")
-                st.write("- OPENAI_API_KEY is set in Streamlit Secrets and is valid.")
-                st.write("- Your OpenAI account has quota or permission to use the model.")
-                st.write("- See Streamlit app logs for deploy/build errors if any.")
 
 
 
