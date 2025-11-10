@@ -15,7 +15,8 @@ reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)  # GPU disabled for Streaml
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 st.title("🧠 AI-Driven Personalized Cancer Care Chatbot")
 st.write(
-    "Upload medical reports or imaging files (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get health summary, suggested doctor questions, and nutrition advice."
+    "Upload medical reports or imaging files (JPG/PNG/PDF) or paste a short lab/test excerpt. "
+    "Click Generate to get health summary, suggested doctor questions, and nutrition advice."
 )
 
 # ===== OpenAI API key and client setup =====
@@ -124,10 +125,13 @@ if st.button("Generate Summary & Recommendations"):
         with st.spinner("Generating AI output..."):
             all_lab_text = input_source if input_source else "\n".join(lab_texts)
             health_index = compute_health_index_with_imaging(all_lab_text, image_texts)
+            
+            # 保存到 session_state
+            st.session_state['health_index'] = health_index
+
             st.subheader("📊 Health Index")
             st.write(f"Combined Health Index (0-100): {health_index}")
 
-            # GPT Prompt
             prompt = f"""
 You are a clinical-support assistant. Given the patient's report text below, produce:
 1) A concise health summary in plain language (3-4 short sentences).
@@ -146,7 +150,6 @@ Nutrition:
 - ...
 Keep the language simple and suitable for elderly patients and family members.
 """
-
             try:
                 resp = client.chat.completions.create(
                     model="gpt-3.5-turbo",
@@ -154,52 +157,60 @@ Keep the language simple and suitable for elderly patients and family members.
                     max_tokens=500,
                     temperature=0.2
                 )
-                # Extract text robustly
                 try:
                     ai_text = resp.choices[0].message.content
                 except Exception:
                     ai_text = resp["choices"][0]["message"]["content"] if "choices" in resp else str(resp)
 
-                # Display sections
-                st.subheader("🧾 Health Summary")
+                # 解析各部分
+                summary, questions, nutrition = ai_text, "", ""
                 if "Summary:" in ai_text:
                     summary = ai_text.split("Summary:")[1].split("Questions:")[0].strip()
-                    st.write(summary)
-                else:
-                    st.write(ai_text)
-
-                st.subheader("❓ Suggested Questions for the Doctor")
                 if "Questions:" in ai_text:
                     questions = ai_text.split("Questions:")[1].split("Nutrition:")[0].strip()
-                    st.write(questions)
-                else:
-                    st.write("No clearly labeled 'Questions' section detected.")
-
-                st.subheader("🥗 Nutrition Recommendations")
                 if "Nutrition:" in ai_text:
                     nutrition = ai_text.split("Nutrition:")[1].strip()
-                    st.write(nutrition)
-                else:
-                    st.write("No clearly labeled 'Nutrition' section detected.")
 
-                # Optional Twilio WhatsApp send
-                if twilio_client and st.button("Send Health Update to Family via WhatsApp"):
-                    try:
-                        message_body = f"Health Index: {health_index}\n\nSummary:\n{summary}\n\nNutrition:\n{nutrition}"
-                        twilio_msg = twilio_client.messages.create(
-                            body=message_body,
-                            from_=st.secrets["TWILIO_WHATSAPP_FROM"],
-                            to=st.secrets["TWILIO_WHATSAPP_TO"]
-                        )
-                        st.success("WhatsApp message sent successfully!")
-                    except Exception as e:
-                        st.error(f"Failed to send WhatsApp message: {e}")
+                # 保存到 session_state
+                st.session_state['summary'] = summary
+                st.session_state['questions'] = questions
+                st.session_state['nutrition'] = nutrition
+
+                st.subheader("🧾 Health Summary")
+                st.write(summary)
+                st.subheader("❓ Suggested Questions for the Doctor")
+                st.write(questions if questions else "No clearly labeled 'Questions' section detected.")
+                st.subheader("🥗 Nutrition Recommendations")
+                st.write(nutrition if nutrition else "No clearly labeled 'Nutrition' section detected.")
 
                 with st.expander("Full AI output (raw)"):
                     st.code(ai_text)
 
             except Exception as e:
                 st.error(f"OpenAI API call failed: {e}")
+
+
+# ===== Button: Send WhatsApp via Twilio Sandbox =====
+if twilio_client and st.button("Send Health Update to Family via WhatsApp"):
+    if 'health_index' not in st.session_state:
+        st.error("Generate AI output first before sending WhatsApp message.")
+    else:
+        try:
+            message_body = (
+                f"Health Index: {st.session_state['health_index']}\n\n"
+                f"Summary:\n{st.session_state['summary']}\n\n"
+                f"Nutrition:\n{st.session_state['nutrition']}"
+            )
+            twilio_msg = twilio_client.messages.create(
+                body=message_body,
+                from_=st.secrets["TWILIO_WHATSAPP_FROM"],
+                to=st.secrets["TWILIO_WHATSAPP_TO"]
+            )
+            st.success("WhatsApp message sent successfully!")
+            st.write("Twilio Response:", twilio_msg)
+        except Exception as e:
+            st.error(f"Failed to send WhatsApp message: {e}")
+
 
 
 
