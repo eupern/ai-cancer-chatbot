@@ -1,7 +1,6 @@
 # app.py
 import streamlit as st
 import os
-import re
 from openai import OpenAI
 from PIL import Image
 from pdf2image import convert_from_bytes
@@ -16,8 +15,7 @@ reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)  # GPU disabled for Streaml
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 st.title("🧠 AI-Driven Personalized Cancer Care Chatbot")
 st.write(
-    "Upload medical reports or imaging files (JPG/PNG/PDF) or paste a short lab/test excerpt. "
-    "Click Generate to get health summary, suggested doctor questions, and nutrition advice."
+    "Upload medical reports or imaging files (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get health summary, suggested doctor questions, and nutrition advice."
 )
 
 # ===== OpenAI API key and client setup =====
@@ -116,31 +114,6 @@ def compute_health_index_with_imaging(report_texts, image_reports_texts=None):
     combined_score = lab_score * 0.7 + image_score * 0.3
     return round(combined_score, 1)
 
-# ===== Helper: robust section extractor =====
-def extract_section(text, header):
-    """
-    Extract content for a header (Summary, Questions, Nutrition) using regex with fallbacks.
-    Returns stripped string or 'No findings.' if nothing found.
-    """
-    # Primary: look for the exact header
-    pattern = rf"{header}\s*[:\-]?\s*(.*?)(?=\n(?:Summary|Questions|Nutrition)\s*[:\-]|\Z)"
-    m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
-    if m:
-        return m.group(1).strip()
-
-    # Fallback variants
-    variants = {
-        "Questions": [r"questions to ask", r"doctor questions", r"questions:", r"questions to ask the doctor", r"questions for doctor"],
-        "Summary": [r"summary", r"health summary", r"clinical summary"],
-        "Nutrition": [r"nutrition", r"recommendations", r"diet", r"nutrition recommendations"]
-    }
-    for v in variants.get(header, []):
-        m2 = re.search(rf"{v}\s*[:\-]?\s*(.*?)(?=\n(?:summary|questions|nutrition)\s*[:\-]|\Z)", text, flags=re.IGNORECASE | re.DOTALL)
-        if m2:
-            return m2.group(1).strip()
-
-    return "No findings."
-
 # ===== Button: Generate AI output =====
 if st.button("Generate Summary & Recommendations"):
     if not input_source and not lab_texts:
@@ -151,72 +124,83 @@ if st.button("Generate Summary & Recommendations"):
         with st.spinner("Generating AI output..."):
             all_lab_text = input_source if input_source else "\n".join(lab_texts)
             health_index = compute_health_index_with_imaging(all_lab_text, image_texts)
-
-            # save to session_state early
-            st.session_state['health_index'] = health_index
-
             st.subheader("📊 Health Index")
             st.write(f"Combined Health Index (0-100): {health_index}")
 
-            # ===== GPT prompt (more strict) =====
+            # GPT Prompt
             prompt = f"""
-You are a clinical-support assistant. Given the patient's report text below, produce exactly three labelled sections: Summary, Questions, Nutrition.
-- Write "Summary:" then 3-4 short sentences in plain language.
-- Write "Questions:" then a numbered or bulleted list of three practical questions the patient/family should ask the doctor next visit.
-- Write "Nutrition:" then three simple, food-based nutrition recommendations based on Malaysia Cancer Nutrition Guidelines.
-If any section has no data to provide, write the section header and then "No findings.".
+You are a clinical-support assistant. Given the patient's report text below, produce:
+1) A concise health summary in plain language (3-4 short sentences).
+2) Three practical questions the patient/family should ask the doctor at the next visit.
+3) Three personalized, food-based nutrition recommendations based on Malaysia Cancer Nutrition Guidelines (simple and actionable).
 
 Patient report:
 \"\"\"{all_lab_text}\"\"\"
 
-Output format (must include these headers exactly): 
+Output format:
 Summary:
 - ...
 Questions:
 - ...
 Nutrition:
 - ...
+Keep the language simple and suitable for elderly patients and family members.
 """
 
             try:
                 resp = client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=700,
+                    max_tokens=500,
                     temperature=0.2
                 )
-                # robust extraction of text
+                # Extract text robustly
                 try:
                     ai_text = resp.choices[0].message.content
                 except Exception:
                     ai_text = resp["choices"][0]["message"]["content"] if "choices" in resp else str(resp)
 
-                # ===== robust section parsing =====
-                summary = extract_section(ai_text, "Summary")
-                questions = extract_section(ai_text, "Questions")
-                nutrition = extract_section(ai_text, "Nutrition")
-
-                # normalize tiny outputs
-                if not summary or summary.strip() == "":
-                    summary = "No findings."
-                if not questions or questions.strip() == "":
-                    questions = "No findings."
-                if not nutrition or nutrition.strip() == "":
-                    nutrition = "No findings."
-
-                # save to session_state so Send button can use them reliably
-                st.session_state['summary'] = summary
-                st.session_state['questions'] = questions
-                st.session_state['nutrition'] = nutrition
-                st.session_state['ai_raw'] = ai_text
-
-                # Display
+                # Display sections
                 st.subheader("🧾 Health Summary")
-                st.write(summary)
+                if "Summary:" in ai_text:
+                    summary = ai_text.split("Summary:")[1].split("Questions:")[0].strip()
+                    st.write(summary)
+                else:
+                    summary = ai_text
+                    st.write(summary)
+
                 st.subheader("❓ Suggested Questions for the Doctor")
-                st.write(questions)
+                if "Questions:" in ai_text:
+                    questions = ai_text.split("Questions:")[1].split("Nutrition:")[0].strip()
+                    st.write(questions)
+                else:
+                    st.write("No clearly labeled 'Questions' section detected.")
+
                 st.subheader("🥗 Nutrition Recommendations")
-                st.write(nutrition)
+                if "Nutrition:" in ai_text:
+                    nutrition = ai_text.split("Nutrition:")[1].strip()
+                    st.write(nutrition)
+                else:
+                    st.write("No clearly labeled 'Nutrition' section detected.")
+
+                # Optional Twilio WhatsApp send with detailed logs
+                if twilio_client and st.button("Send Health Update to Family via WhatsApp"):
+                    try:
+                        message_body = f"Health Index: {health_index}\n\nSummary:\n{summary}\n\nNutrition:\n{nutrition}"
+                        twilio_msg = twilio_client.messages.create(
+                            body=message_body,
+                            from_=st.secrets["TWILIO_WHATSAPP_FROM"],
+                            to=st.secrets["TWILIO_WHATSAPP_TO"]
+                        )
+                        st.success("WhatsApp message sent successfully!")
+                        st.write("✅ Message SID:", twilio_msg.sid)
+                        st.write("✅ Message Status:", twilio_msg.status)
+                        st.write("✅ Date Created:", twilio_msg.date_created)
+                        st.write("✅ From:", twilio_msg.from_)
+                        st.write("✅ To:", twilio_msg.to)
+                    except Exception as e:
+                        st.error(f"Failed to send WhatsApp message: {e}")
+                        st.write("⚠️ Check Sandbox join code, phone verification, and Twilio credentials.")
 
                 with st.expander("Full AI output (raw)"):
                     st.code(ai_text)
@@ -224,36 +208,6 @@ Nutrition:
             except Exception as e:
                 st.error(f"OpenAI API call failed: {e}")
 
-# ===== Button: Send WhatsApp via Twilio Sandbox with detailed logs =====
-if twilio_client and st.button("Send Health Update to Family via WhatsApp"):
-    if 'health_index' not in st.session_state:
-        st.error("Generate AI output first before sending WhatsApp message.")
-    else:
-        try:
-            # Use session_state values (guaranteed to exist after generation)
-            message_body = (
-                f"Health Index: {st.session_state.get('health_index', 'N/A')}\n\n"
-                f"Summary:\n{st.session_state.get('summary', 'No findings.')}\n\n"
-                f"Questions:\n{st.session_state.get('questions', 'No findings.')}\n\n"
-                f"Nutrition:\n{st.session_state.get('nutrition', 'No findings.')}"
-            )
-
-            twilio_msg = twilio_client.messages.create(
-                body=message_body,
-                from_=st.secrets["TWILIO_WHATSAPP_FROM"],
-                to=st.secrets["TWILIO_WHATSAPP_TO"]
-            )
-            st.success("WhatsApp message sent successfully!")
-            # Detailed logs for debugging
-            st.write("✅ Message SID:", getattr(twilio_msg, "sid", None))
-            st.write("✅ Message Status:", getattr(twilio_msg, "status", None))
-            st.write("✅ Date Created:", getattr(twilio_msg, "date_created", None))
-            st.write("✅ From:", getattr(twilio_msg, "from_", None))
-            st.write("✅ To:", getattr(twilio_msg, "to", None))
-            # If Twilio returns errors, they may appear as attributes on the response or raise exceptions.
-        except Exception as e:
-            st.error(f"Failed to send WhatsApp message: {e}")
-            st.write("⚠️ Check Sandbox join code, phone verification, and Twilio credentials.")
 
 
 
