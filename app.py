@@ -6,20 +6,19 @@ from PIL import Image
 from pdf2image import convert_from_bytes
 import numpy as np
 import easyocr
-import re
-from twilio.rest import Client as TwilioClient
+from twilio.rest import Client
 
-# ====== EasyOCR setup ======
+# ===== Initialize EasyOCR reader =====
 reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
 
-# ====== Streamlit config ======
+# ===== Streamlit page config =====
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 st.title("🧠 AI-Driven Personalized Cancer Care Chatbot")
 st.write(
-    "Upload a medical report (JPG/PNG/PDF) or paste a short test/result. Click Generate to get a health summary, suggested doctor questions, nutrition advice, and send WhatsApp updates."
+    "Upload medical reports (JPG/PNG/PDF, multi-page supported) or paste a short test/result. Click Generate to get a health summary, suggested doctor questions, and nutrition advice."
 )
 
-# ====== OpenAI API key and client ======
+# ===== OpenAI API key & client setup =====
 OPENAI_API_KEY = None
 try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -27,215 +26,151 @@ except Exception:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not OPENAI_API_KEY:
-    st.warning("OpenAI API key not found. Paste a key for this session (not saved).")
-    api_key_input = st.text_input("OpenAI API key:", type="password")
+    st.warning("OpenAI API key not found. Paste for this session (not saved).")
+    api_key_input = st.text_input("Paste OpenAI API key:", type="password")
     if api_key_input:
         OPENAI_API_KEY = api_key_input
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# ====== Twilio config (optional, for WhatsApp notifications) ======
-TWILIO_ACCOUNT_SID = st.secrets.get("TWILIO_ACCOUNT_SID") if "TWILIO_ACCOUNT_SID" in st.secrets else os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = st.secrets.get("TWILIO_AUTH_TOKEN") if "TWILIO_AUTH_TOKEN" in st.secrets else os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_FROM = st.secrets.get("TWILIO_WHATSAPP_FROM") if "TWILIO_WHATSAPP_FROM" in st.secrets else os.getenv("TWILIO_WHATSAPP_FROM")
+# ===== Twilio setup =====
+TWILIO_ACCOUNT_SID = st.secrets.get("TWILIO_ACCOUNT_SID", None)
+TWILIO_AUTH_TOKEN = st.secrets.get("TWILIO_AUTH_TOKEN", None)
+TWILIO_WHATSAPP_FROM = st.secrets.get("TWILIO_WHATSAPP_FROM", None)  # e.g., "whatsapp:+1415xxxxxxx"
+WHATSAPP_TO = st.text_input("Recipient WhatsApp number (include 'whatsapp:+countrycode')", "")
 
-twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN else None
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN else None
 
-# ====== Input UI ======
-st.subheader("1) Input report or summary")
-uploaded_file = st.file_uploader("Upload a medical report (JPG/PNG/PDF)", type=["jpg", "jpeg", "png", "pdf"])
+# ===== Input UI =====
+st.subheader("1) Input reports or summary")
+uploaded_files = st.file_uploader("Upload medical reports (JPG/PNG/PDF, multi-file supported)", type=["jpg","jpeg","png","pdf"], accept_multiple_files=True)
 text_input = st.text_area("Or paste a short lab summary / excerpt here", height=160)
 
-# ====== OCR extraction ======
+# ===== OCR extraction =====
 ocr_text = ""
-if uploaded_file:
-    try:
-        if uploaded_file.type.startswith("image"):
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded report (preview)", use_column_width=True)
-            result = reader.readtext(np.array(image), detail=0)
-            ocr_text = "\n".join(result)
-        elif uploaded_file.type == "application/pdf":
-            pages = convert_from_bytes(uploaded_file.read())
-            for page in pages:
-                page_arr = np.array(page)
-                result = reader.readtext(page_arr, detail=0)
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        try:
+            if uploaded_file.type.startswith("image"):
+                image = Image.open(uploaded_file)
+                st.image(image, caption=f"Preview: {uploaded_file.name}", use_column_width=True)
+                result = reader.readtext(np.array(image), detail=0)
                 ocr_text += "\n".join(result) + "\n"
-        else:
-            st.warning("Uploaded file type not supported.")
-    except Exception as e:
-        st.error(f"OCR processing failed: {e}")
+            elif uploaded_file.type == "application/pdf":
+                pages = convert_from_bytes(uploaded_file.read())
+                for page in pages:
+                    page_arr = np.array(page)
+                    result = reader.readtext(page_arr, detail=0)
+                    ocr_text += "\n".join(result) + "\n"
+            else:
+                st.warning(f"Unsupported file type: {uploaded_file.name}")
+        except Exception as e:
+            st.error(f"OCR failed for {uploaded_file.name}: {e}")
 
 if ocr_text.strip():
     text_input = st.text_area("OCR extracted text (editable)", value=ocr_text, height=200)
 
 input_source = text_input.strip() if text_input and text_input.strip() else None
 
-# ====== Health Index computation ======
-def compute_health_index_smart(report_text):
-    score = 100
-    summary = []
-    text = report_text.lower()
-
-    def extract_number(keyword):
-        pattern = rf"{keyword}[:\s]*([\d\.]+)"
-        match = re.search(pattern, text)
-        if match:
-            try:
-                return float(match.group(1))
-            except:
-                return None
+# ===== Health Index calculation =====
+def compute_health_index(report_text):
+    """
+    Example heuristic-based Health Index:
+    - Checks for key markers like hemoglobin, WBC, platelets, blood sugar
+    - Returns 0-100 score (simplified for demonstration)
+    """
+    if not report_text:
         return None
+    score = 100
+    keywords = {
+        'hemoglobin': 5,
+        'wbc': 5,
+        'platelets': 5,
+        'glucose': 5,
+        'blood sugar':5
+    }
+    for kw, deduction in keywords.items():
+        if kw.lower() in report_text.lower():
+            score -= deduction
+    score = max(0, min(score,100))
+    return score
 
-    # WBC
-    wbc = extract_number("wbc")
-    if wbc is not None:
-        if wbc < 4:
-            score -= 20; summary.append(f"WBC low ({wbc})")
-        elif wbc > 10:
-            score -= 10; summary.append(f"WBC high ({wbc})")
-        else:
-            summary.append(f"WBC normal ({wbc})")
+health_index = compute_health_index(input_source) if input_source else None
+if health_index is not None:
+    st.metric("🏥 Health Index", f"{health_index}/100")
 
-    # Hb
-    hb = extract_number("hb")
-    if hb is not None:
-        if hb < 12:
-            score -= 15; summary.append(f"Hb low ({hb})")
-        elif hb > 17.5:
-            score -= 5; summary.append(f"Hb high ({hb})")
-        else:
-            summary.append(f"Hb normal ({hb})")
-
-    # PLT
-    plt = extract_number("plt")
-    if plt is not None:
-        if plt < 150:
-            score -= 10; summary.append(f"PLT low ({plt})")
-        elif plt > 450:
-            score -= 10; summary.append(f"PLT high ({plt})")
-        else:
-            summary.append(f"PLT normal ({plt})")
-
-    # Glucose
-    glucose = extract_number("glucose")
-    if glucose is not None:
-        if glucose < 70:
-            score -= 10; summary.append(f"Glucose low ({glucose})")
-        elif glucose > 100:
-            score -= 10; summary.append(f"Glucose high ({glucose})")
-        else:
-            summary.append(f"Glucose normal ({glucose})")
-
-    # Blood Pressure
-    bp_match = re.search(r"bp[:\s]*([\d]+)[\/\s]([\d]+)", text)
-    if bp_match:
-        syst, diast = int(bp_match.group(1)), int(bp_match.group(2))
-        if syst > 140 or diast > 90:
-            score -= 10; summary.append(f"BP high ({syst}/{diast})")
-        elif syst < 90 or diast < 60:
-            score -= 5; summary.append(f"BP low ({syst}/{diast})")
-        else:
-            summary.append(f"BP normal ({syst}/{diast})")
-
-    score = max(0, min(100, score))
-    return score, "; ".join(summary)
-
-# ====== Generate Button ======
+# ===== Button: Generate GPT output =====
 if st.button("Generate Summary & Recommendations"):
     if not input_source:
-        st.error("Provide report text or upload OCR-compatible file.")
+        st.error("Please paste or upload reports first.")
     elif not client:
         st.error("OpenAI client not configured.")
     else:
-        with st.spinner("Processing..."):
-            # Health Index
-            health_index, health_summary_text = compute_health_index_smart(input_source)
-            st.subheader("📊 Health Index")
-            st.write(f"{health_index}/100")
-            st.write(health_summary_text)
-
-            # GPT Prompt
+        with st.spinner("Generating AI output..."):
             prompt = f"""
-You are a clinical-support assistant. Given the patient's report text below, produce:
-1) A concise health summary in plain language (3-4 short sentences).
-2) Three practical questions the patient/family should ask the doctor at the next visit.
-3) Three personalized, food-based nutrition recommendations based on Malaysia Cancer Nutrition Guidelines (simple and actionable).
+You are a clinical-support assistant. Based on the patient's report below, produce:
+1) A concise health summary in plain language (3-4 short sentences)
+2) Three practical questions for the next doctor visit
+3) Three personalized nutrition recommendations (Malaysia Cancer Nutrition Guidelines)
 
 Patient report:
 \"\"\"{input_source}\"\"\"
 
-Output format (use these labels):
+Output format:
 Summary:
 - ...
 Questions:
 - ...
 Nutrition:
 - ...
-Keep the language simple and suitable for elderly patients and family members.
+Keep it simple for elderly patients/family.
+Health Index: {health_index}/100
 """
-
             try:
                 resp = client.chat.completions.create(
                     model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=500,
+                    messages=[{"role":"user","content":prompt}],
+                    max_tokens=700,
                     temperature=0.2
                 )
-
-                ai_text = ""
                 try:
                     ai_text = resp.choices[0].message.content
-                except Exception:
-                    try:
-                        ai_text = resp["choices"][0]["message"]["content"]
-                    except Exception:
-                        ai_text = str(resp)
+                except:
+                    ai_text = resp["choices"][0]["message"]["content"]
 
-                # Display GPT output
-                st.subheader("🧾 Health Summary (AI)")
-                if "Summary:" in ai_text:
-                    try: st.write(ai_text.split("Summary:")[1].split("Questions:")[0].strip())
-                    except: st.write(ai_text)
-                else: st.write(ai_text[:1000] + "...")
+                # ===== Display sections =====
+                st.subheader("🧾 Health Summary")
+                summary = ai_text.split("Summary:")[1].split("Questions:")[0].strip() if "Summary:" in ai_text else ai_text
+                st.write(summary)
 
                 st.subheader("❓ Suggested Questions for the Doctor")
-                if "Questions:" in ai_text:
-                    try: st.write(ai_text.split("Questions:")[1].split("Nutrition:")[0].strip())
-                    except: st.write("Questions parse error; see raw output below.")
-                else:
-                    st.write("No 'Questions:' section detected.")
+                questions = ai_text.split("Questions:")[1].split("Nutrition:")[0].strip() if "Questions:" in ai_text else "See summary above."
+                st.write(questions)
 
                 st.subheader("🥗 Nutrition Recommendations")
-                if "Nutrition:" in ai_text:
-                    try: st.write(ai_text.split("Nutrition:")[1].strip())
-                    except: st.write("Nutrition parse error; see raw output below.")
-                else:
-                    st.write("No 'Nutrition:' section detected.")
+                nutrition = ai_text.split("Nutrition:")[1].strip() if "Nutrition:" in ai_text else "No nutrition section detected."
+                st.write(nutrition)
 
+                # ===== Send WhatsApp if configured =====
+                if twilio_client and WHATSAPP_TO:
+                    message_text = f"Health Index: {health_index}/100\n\nSummary:\n{summary}\n\nQuestions:\n{questions}\n\nNutrition:\n{nutrition}"
+                    try:
+                        twilio_client.messages.create(
+                            body=message_text,
+                            from_=TWILIO_WHATSAPP_FROM,
+                            to=WHATSAPP_TO
+                        )
+                        st.success("WhatsApp notification sent successfully!")
+                    except Exception as e:
+                        st.error(f"WhatsApp sending failed: {e}")
+
+                # ===== Expandable raw output =====
                 with st.expander("Full AI output (raw)"):
                     st.code(ai_text)
 
-                # ===== Optional: Send WhatsApp =====
-                if twilio_client and TWILIO_WHATSAPP_FROM:
-                    st.subheader("📲 WhatsApp Notification")
-                    whatsapp_number = st.text_input("Recipient WhatsApp number (+countrycode, e.g., +60123456789):")
-                    if whatsapp_number and st.button("Send WhatsApp Update"):
-                        message_text = f"Health Index: {health_index}/100\n{health_summary_text}\n\nAI Summary & Recommendations:\n{ai_text}"
-                        try:
-                            twilio_client.messages.create(
-                                body=message_text,
-                                from_=f"whatsapp:{TWILIO_WHATSAPP_FROM}",
-                                to=f"whatsapp:{whatsapp_number}"
-                            )
-                            st.success("WhatsApp message sent!")
-                        except Exception as e:
-                            st.error(f"Failed to send WhatsApp message: {e}")
-                    elif not whatsapp_number:
-                        st.info("Enter a WhatsApp number above to send updates.")
-
             except Exception as e:
                 st.error(f"OpenAI API call failed: {e}")
+
 
 
 
