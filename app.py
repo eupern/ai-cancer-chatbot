@@ -181,7 +181,26 @@ Keep the language simple and suitable for elderly patients and family members.
                     except Exception:
                         st.write("Questions section parse error; see full output below.")
                 else:
-                    st.write("No clearly labeled 'Questions:' section detected. S
+                    st.write("No clearly labeled 'Questions:' section detected. See full output below.")
+
+                st.subheader("🥗 Nutrition Recommendations")
+                if "Nutrition:" in ai_text:
+                    try:
+                        nutrition = ai_text.split("Nutrition:")[1].strip()
+                        st.write(nutrition)
+                    except Exception:
+                        st.write("Nutrition section parse error; see full output below.")
+                else:
+                    st.write("No clearly labeled 'Nutrition:' section detected. See full output below.")
+
+                with st.expander("Full AI output (raw)"):
+                    st.code(ai_text)
+
+            except Exception as e:
+                st.error(f"OpenAI API call failed: {e}")
+                st.write("---")
+                st.write("Check OPENAI_API_KEY, quota, or model availability.")
+
 
 
 
