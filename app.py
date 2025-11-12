@@ -305,7 +305,36 @@ Please refine and provide updated Summary, Questions, Nutrition, and Dietitian-l
                             max_tokens=700,
                             temperature=0.2
                         )
-                        ai_text2 = resp2.choices[0]._
+                        ai_text2 = resp2.choices[0].message.content
+                        st.subheader("Refined AI Summary & Recommendations")
+                        st.text_area("Refined AI output", value=ai_text2, height=300)
+
+                # Optional email column
+                st.subheader("Send Final Report via Email (optional)")
+                send_email = st.checkbox("Send report to email")
+                if send_email:
+                    email_address = st.text_input("Recipient email address")
+                    if st.button("Send Email"):
+                        try:
+                            content = f"Health Index: {health_index}\n\nSummary:\n{summary}\n\nQuestions:\n{questions}\n\nNutrition:\n{nutrition}\n\nDietary Deep Dive:\n{deep_text}"
+                            msg = MIMEText(content)
+                            msg['Subject'] = "AI-Driven Personalized Health Report"
+                            msg['From'] = "noreply@example.com"
+                            msg['To'] = email_address
+                            # Example SMTP send (configure your SMTP)
+                            s = smtplib.SMTP('localhost')
+                            s.send_message(msg)
+                            s.quit()
+                            st.success(f"Report sent to {email_address}")
+                        except Exception as e:
+                            st.error(f"Failed to send email: {e}")
+
+                with st.expander("Full AI output (raw)"):
+                    st.code(ai_text)
+
+            except Exception as e:
+                st.error(f"OpenAI API call failed: {e}")
+
 
 
 
