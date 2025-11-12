@@ -36,28 +36,23 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 # -------------------------
 # Session state defaults
 # -------------------------
-if 'uploaded_files_meta' not in st.session_state:
-    st.session_state['uploaded_files_meta'] = None
-if 'uploaded_files' not in st.session_state:
-    st.session_state['uploaded_files'] = None
-if 'ocr_lab_texts' not in st.session_state:
-    st.session_state['ocr_lab_texts'] = []
-if 'ocr_image_texts' not in st.session_state:
-    st.session_state['ocr_image_texts'] = []
-if 'all_lab_text' not in st.session_state:
-    st.session_state['all_lab_text'] = ""
-if 'ai_raw' not in st.session_state:
-    st.session_state['ai_raw'] = ""
-if 'summary' not in st.session_state:
-    st.session_state['summary'] = ""
-if 'questions' not in st.session_state:
-    st.session_state['questions'] = ""
-if 'dietary' not in st.session_state:
-    st.session_state['dietary'] = ""
-if 'generated' not in st.session_state:
-    st.session_state['generated'] = False
-if 'health_index' not in st.session_state:
-    st.session_state['health_index'] = None
+defaults = {
+    'uploaded_files_meta': None,
+    'uploaded_files': None,
+    'ocr_lab_texts': [],
+    'ocr_image_texts': [],
+    'all_lab_text': "",
+    'ai_raw': "",
+    'summary': "",
+    'questions': "",
+    'dietary': "",
+    'generated': False,
+    'health_index': None,
+    'chat_history': []
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # -------------------------
 # Helpers
@@ -202,6 +197,9 @@ def clean_questions_text(q_text):
     cleaned = "\n".join(filtered).strip()
     return cleaned if cleaned else q_text
 
+def append_chat(role, text):
+    st.session_state['chat_history'].append((role, text))
+
 # -------------------------
 # UI: Upload + OCR (persisted)
 # -------------------------
@@ -284,6 +282,7 @@ Patient report:
                 )
                 ai_text = resp.choices[0].message.content
                 st.session_state['ai_raw'] = ai_text
+                append_chat("assistant", ai_text)
 
                 raw_summary = extract_section(ai_text, "Summary")
                 raw_questions = extract_section(ai_text, "Questions")
@@ -307,18 +306,24 @@ if st.session_state.get('generated'):
     st.subheader("Health Index")
     st.write(f"Combined Health Index (0-100): {st.session_state.get('health_index','N/A')}")
     st.markdown("---")
-    st.subheader("Health Summary")
-    st.write(st.session_state.get('summary','No findings.'))  # only summary content shown here
-    st.markdown("---")
-    st.subheader("Suggested Questions for the Doctor")
-    st.write(st.session_state.get('questions','No findings.'))
-    st.markdown("---")
-    st.subheader("Dietary Advice")
-    st.text_area("Dietary Advice (dietitian-level, copyable)", value=st.session_state.get('dietary',''), height=360)
+    # Columns view: Summary | Questions | Dietary
+    cols = st.columns([2,2,3])
+    with cols[0]:
+        st.subheader("Summary")
+        st.write(st.session_state.get('summary','No findings.'))
+    with cols[1]:
+        st.subheader("Suggested Questions for the Doctor")
+        st.write(st.session_state.get('questions','No findings.'))
+    with cols[2]:
+        st.subheader("Dietary Advice (copyable)")
+        st.text_area("Dietary Advice", value=st.session_state.get('dietary',''), height=260)
+    with st.expander("Full AI output (latest)"):
+        st.code(st.session_state.get('ai_raw',''))
 
 # -------------------------
-# Follow-up: what to refine?
+# Follow-up: Refine (Dietary / Questions / Both)
 # -------------------------
+st.markdown("---")
 st.subheader("3) Ask follow-up / refine advice (optional)")
 refine_choice = st.selectbox("Refine which part?", ["Dietary Advice", "Suggested Questions for the Doctor", "Both (Summary + Questions + Dietary Advice)"])
 follow_up_q = st.text_area("Type follow-up question (optional):", height=90)
@@ -332,9 +337,7 @@ if st.button("Refine Selected"):
             st.error("No lab text found in session.")
         else:
             with st.spinner("Refining..."):
-                # Build prompt according to selection
                 if refine_choice == "Dietary Advice":
-                    # Request only a Diet section from the model (we will save it under dietary)
                     prompt_ref = f"""
 You are a clinical dietitian-level assistant. Respond only in English.
 Given the patient report below, produce a labelled section: Dietary Advice.
@@ -343,6 +346,7 @@ Do NOT include Summary or Questions.
 
 Patient report:
 \"\"\"{all_lab_text}\"\"\"
+
 User follow-up request:
 \"\"\"{follow_up_q}\"\"\"
 """
@@ -354,12 +358,12 @@ User follow-up request:
                             temperature=0.2
                         )
                         ai_text = resp.choices[0].message.content
-                        # try to extract Dietary Advice; fallback to whole text
+                        st.session_state['ai_raw'] = ai_text
+                        append_chat("assistant", ai_text)
                         dietary_section = extract_section(ai_text, "Dietary Advice")
-                        # if model didn't use header, use entire response
                         dietary_section = dietary_section if dietary_section and dietary_section!="No findings." else ai_text.strip()
                         st.session_state['dietary'] = dietary_section
-                        st.session_state['ai_raw'] = ai_text
+                        st.session_state['generated'] = True
                         st.success("Dietary advice updated.")
                     except Exception as e:
                         st.error(f"Refine (dietary) failed: {e}")
@@ -372,7 +376,7 @@ Provide updated Summary and Questions only. DO NOT include dietary advice.
 Patient report:
 \"\"\"{all_lab_text}\"\"\"
 
-Previous AI output (for context):
+Previous AI output:
 \"\"\"{st.session_state.get('ai_raw','')}\"\"\"
 
 User follow-up:
@@ -386,12 +390,19 @@ User follow-up:
                             temperature=0.2
                         )
                         ai_text = resp.choices[0].message.content
+                        st.session_state['ai_raw'] = ai_text
+                        append_chat("assistant", ai_text)
                         raw_summary = extract_section(ai_text, "Summary")
                         raw_questions = extract_section(ai_text, "Questions")
+                        # fallback: if extraction fails, use full ai_text
+                        if (raw_summary == "No findings.") and (raw_questions == "No findings."):
+                            # use full ai_text as fallback for visibility
+                            raw_summary = st.session_state.get('summary','')
+                            raw_questions = ai_text
                         cleaned_questions = clean_questions_text(raw_questions)
                         st.session_state['summary'] = raw_summary
                         st.session_state['questions'] = cleaned_questions
-                        st.session_state['ai_raw'] = ai_text
+                        st.session_state['generated'] = True
                         st.success("Summary and questions updated.")
                     except Exception as e:
                         st.error(f"Refine (questions) failed: {e}")
@@ -399,7 +410,7 @@ User follow-up:
                 else:  # Both
                     prompt_ref = f"""
 You are a clinical-support assistant. Respond only in English.
-Provide updated Summary, Questions, and Dietary Advice (label each section with the headers: Summary, Questions, Dietary Advice).
+Provide updated Summary, Questions, and Dietary Advice (label each section with: Summary, Questions, Dietary Advice).
 - Summary: 2-4 short sentences.
 - Questions: 3 practical questions for the doctor (do NOT include diet instructions here).
 - Dietary Advice: dietitian-level, 1-day sample menu, rationale, and food-safety notes.
@@ -407,8 +418,9 @@ Provide updated Summary, Questions, and Dietary Advice (label each section with 
 Patient report:
 \"\"\"{all_lab_text}\"\"\"
 
-Previous AI output (for context):
+Previous AI output:
 \"\"\"{st.session_state.get('ai_raw','')}\"\"\"
+
 User follow-up:
 \"\"\"{follow_up_q}\"\"\"
 """
@@ -420,31 +432,51 @@ User follow-up:
                             temperature=0.2
                         )
                         ai_text = resp.choices[0].message.content
+                        st.session_state['ai_raw'] = ai_text
+                        append_chat("assistant", ai_text)
                         raw_summary = extract_section(ai_text, "Summary")
                         raw_questions = extract_section(ai_text, "Questions")
                         dietary_section = extract_section(ai_text, "Dietary Advice")
-                        # fallback if model didn't use header
-                        if not dietary_section or dietary_section=="No findings.":
-                            # try to pull Nutrition or entire response
+                        if (raw_summary == "No findings.") and (raw_questions == "No findings."):
+                            # fallback
+                            raw_summary = st.session_state.get('summary','')
+                            raw_questions = ai_text
+                        if not dietary_section or dietary_section == "No findings.":
                             dietary_section = extract_section(ai_text, "Nutrition")
                         dietary_section = dietary_section if dietary_section and dietary_section!="No findings." else ai_text.strip()
                         cleaned_questions = clean_questions_text(raw_questions)
                         st.session_state['summary'] = raw_summary
                         st.session_state['questions'] = cleaned_questions
                         st.session_state['dietary'] = dietary_section
-                        st.session_state['ai_raw'] = ai_text
+                        st.session_state['generated'] = True
                         st.success("Summary, questions and dietary advice updated.")
                     except Exception as e:
                         st.error(f"Refine (both) failed: {e}")
 
-# After refine, show current values (if generated)
+# show current values after refine (columns above handle display)
 if st.session_state.get('generated'):
     st.markdown("### Current Summary / Questions / Dietary Advice (most recent)")
-    st.write(st.session_state.get('summary',''))
-    st.write(st.session_state.get('questions',''))
-    st.text_area("Dietary Advice (copyable)", value=st.session_state.get('dietary',''), height=320)
+    cols2 = st.columns([2,2,3])
+    with cols2[0]:
+        st.subheader("Summary (latest)")
+        st.write(st.session_state.get('summary',''))
+    with cols2[1]:
+        st.subheader("Questions (latest)")
+        st.write(st.session_state.get('questions',''))
+    with cols2[2]:
+        st.subheader("Dietary Advice (copyable)")
+        st.text_area("Dietary Advice", value=st.session_state.get('dietary',''), height=260)
     with st.expander("Full AI output (latest)"):
         st.code(st.session_state.get('ai_raw',''))
+
+# Optional: chat history debug view
+if st.checkbox("Show chat history (debug)"):
+    for role, message in st.session_state.get('chat_history', []):
+        if role == "user":
+            st.markdown(f"**You:** {message}")
+        else:
+            st.markdown(f"**Assistant:**")
+            st.code(message)
 
 # -------------------------
 # Optional email sending
@@ -487,6 +519,7 @@ if send_email:
                 st.success(f"Report sent to {recipient}")
             except Exception as e:
                 st.error(f"Failed to send email: {e}")
+
 
 
 
