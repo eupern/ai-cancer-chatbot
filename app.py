@@ -10,15 +10,16 @@ import easyocr
 import smtplib
 from email.message import EmailMessage
 
-# Initialize EasyOCR
+# -------------------------
+# Config / Initialization
+# -------------------------
 reader = easyocr.Reader(['en', 'ch_sim'], gpu=False)
 
-# Streamlit config
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 st.title("AI-Driven Personalized Cancer Care Chatbot")
 st.write("Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get an English health summary, doctor questions, and dietitian-level dietary advice.")
 
-# OpenAI API key
+# OpenAI client setup
 OPENAI_API_KEY = None
 try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -32,55 +33,40 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# File upload / text input
-st.subheader("1) Input medical reports or lab summary")
-uploaded_files = st.file_uploader(
-    "Upload medical reports / imaging files (JPG/PNG/PDF). You can upload multiple files.",
-    type=["jpg", "jpeg", "png", "pdf"],
-    accept_multiple_files=True
-)
-text_input = st.text_area("Or paste a short lab/test excerpt here (English preferred)", height=160)
+# -------------------------
+# Session state defaults
+# -------------------------
+if 'uploaded_files_meta' not in st.session_state:
+    st.session_state['uploaded_files_meta'] = None  # simple filename tuple for detecting changes
+if 'uploaded_files' not in st.session_state:
+    st.session_state['uploaded_files'] = None       # store the raw uploaded file objects (so widget shows them)
+if 'ocr_lab_texts' not in st.session_state:
+    st.session_state['ocr_lab_texts'] = []
+if 'ocr_image_texts' not in st.session_state:
+    st.session_state['ocr_image_texts'] = []
+if 'all_lab_text' not in st.session_state:
+    st.session_state['all_lab_text'] = ""
+if 'ai_raw' not in st.session_state:
+    st.session_state['ai_raw'] = ""
+if 'summary' not in st.session_state:
+    st.session_state['summary'] = ""
+if 'questions' not in st.session_state:
+    st.session_state['questions'] = ""
+if 'dietary' not in st.session_state:
+    st.session_state['dietary'] = ""
+if 'generated' not in st.session_state:
+    st.session_state['generated'] = False
+if 'health_index' not in st.session_state:
+    st.session_state['health_index'] = None
 
-# OCR extraction
-lab_texts = []
-image_texts = []
-
-if uploaded_files:
-    for uploaded_file in uploaded_files:
-        try:
-            if uploaded_file.type.startswith("image"):
-                img = Image.open(uploaded_file).convert("RGB")
-                st.image(img, caption=f"Preview: {uploaded_file.name}", use_column_width=True)
-                ocr_result = "\n".join(reader.readtext(np.array(img), detail=0))
-            elif uploaded_file.type == "application/pdf":
-                pages = convert_from_bytes(uploaded_file.read())
-                ocr_result = ""
-                for page in pages:
-                    page_arr = np.array(page.convert("RGB"))
-                    ocr_result += "\n".join(reader.readtext(page_arr, detail=0)) + "\n"
-            else:
-                st.warning(f"{uploaded_file.name} is not a supported file type.")
-                continue
-
-            fname_lower = uploaded_file.name.lower()
-            if any(k in fname_lower for k in ["pet", "ct", "xray", "scan"]):
-                image_texts.append(ocr_result)
-            else:
-                lab_texts.append(ocr_result)
-        except Exception as e:
-            st.error(f"OCR failed for {uploaded_file.name}: {e}")
-
-if lab_texts:
-    text_input = st.text_area("OCR extracted lab text (editable, English recommended)", value="\n".join(lab_texts), height=200)
-
-input_source = text_input.strip() if text_input and text_input.strip() else None
-
-# Health index helpers
+# -------------------------
+# Helpers
+# -------------------------
 def compute_health_index_smart(report_text):
     score = 50
     positives = ["normal", "stable", "remission", "improved"]
     negatives = ["metastasis", "high", "low", "elevated", "decreased", "critical", "abnormal", "progression"]
-    t = report_text.lower()
+    t = (report_text or "").lower()
     for p in positives:
         if p in t:
             score += 5
@@ -104,7 +90,6 @@ def compute_health_index_with_imaging(report_texts, image_reports_texts=None):
     combined = lab_score * 0.7 + image_score * 0.3
     return round(combined, 1)
 
-# Lab parsing
 def parse_lab_values(text):
     if not text:
         return {}
@@ -116,10 +101,10 @@ def parse_lab_values(text):
             if m:
                 for g in (1,2,3):
                     try:
-                        val = m.group(g)
-                        if val:
-                            val = val.replace(",", "").strip()
-                            num = re.search(r"[-+]?\d*\.?\d+", val)
+                        v = m.group(g)
+                        if v:
+                            v = v.replace(",", "").strip()
+                            num = re.search(r"[-+]?\d*\.?\d+", v)
                             if num:
                                 return float(num.group(0))
                     except:
@@ -136,7 +121,7 @@ def parse_lab_values(text):
     wbc_10e9 = None
     wbc_note = None
     if raw_wbc is not None:
-        if raw_wbc > 1000 or raw_wbc > 50:
+        if raw_wbc > 50:
             wbc_10e9 = raw_wbc / 1000.0
             wbc_note = f"converted from {raw_wbc} to {wbc_10e9:.2f} x10^9/L"
         else:
@@ -146,7 +131,7 @@ def parse_lab_values(text):
     neut_abs = None
     neut_note = None
     if raw_neut_abs is not None:
-        if raw_neut_abs > 1000 or raw_neut_abs > 50:
+        if raw_neut_abs > 50:
             neut_abs = raw_neut_abs / 1000.0
             neut_note = f"converted from {raw_neut_abs} to {neut_abs:.2f} x10^9/L"
         else:
@@ -161,163 +146,286 @@ def parse_lab_values(text):
 
     results['hb_g_dl'] = raw_hb
     results['wbc_raw'] = raw_wbc
-    results['wbc_10e9_per_L'] = round(wbc_10e9, 2) if wbc_10e9 else None
+    results['wbc_10e9_per_L'] = round(wbc_10e9,2) if wbc_10e9 is not None else None
     results['wbc_note'] = wbc_note
     results['neutrophil_abs_raw'] = raw_neut_abs
-    results['neutrophil_abs'] = round(neut_abs, 2) if neut_abs else None
+    results['neutrophil_abs'] = round(neut_abs,2) if neut_abs is not None else None
     results['neut_note'] = neut_note
     results['neut_percent_raw'] = raw_neut_percent
     results['plt'] = raw_plt
     results['glucose'] = raw_glu
     return results
 
-# Dietary advice generator (always dietitian-level)
-def generate_dietary_advice(lab_vals):
+def generate_dietary_advice_from_labs(lab_vals):
     lines = []
-    lines.append("Dietary advice (dietitian-level):")
-    wbc_note = lab_vals.get('wbc_note')
-    neut_note = lab_vals.get('neut_note')
-    if wbc_note: lines.append(f"(Note: {wbc_note})")
-    if neut_note: lines.append(f"(Note: {neut_note})")
-
-    # Neutropenia / low WBC guidance
-    neut = lab_vals.get('neutrophil_abs')
-    wbc = lab_vals.get('wbc_10e9_per_L') or lab_vals.get('wbc_raw')
-    if neut is not None and neut < 1.5:
-        lines.append("- Patient shows low neutrophils / WBC. Follow strict food-safety and hygiene measures.")
-    elif wbc is not None and wbc < 3:
-        lines.append("- WBC slightly low. Emphasize safe cooked meals.")
-
-    # General nutrition
-    lines.append("- Include well-cooked high-quality proteins: eggs, fish, chicken, tofu, pasteurized yogurt.")
-    lines.append("- Cooked whole grains and vegetables for fiber and gut health.")
-    lines.append("- Nuts, seeds, and small amounts of healthy oils (olive, avocado) for micronutrients and healthy fats.")
-
+    lines.append("Dietary Advice (dietitian-level):")
+    if lab_vals.get('wbc_note'):
+        lines.append(f"({lab_vals.get('wbc_note')})")
+    if lab_vals.get('neut_note'):
+        lines.append(f"({lab_vals.get('neut_note')})")
+    if lab_vals.get('neutrophil_abs') is not None and lab_vals['neutrophil_abs'] < 1.5:
+        lines.append("- Low neutrophils: avoid raw or undercooked foods; prioritise thoroughly cooked proteins and strict hygiene.")
     lines.append("\nSample 1-day menu (reference):")
-    lines.append("- Breakfast: cooked oats + cooked banana + pumpkin seeds + pasteurized yogurt")
-    lines.append("- Lunch: steamed chicken breast + cooked brown rice + steamed carrot + cooked spinach")
-    lines.append("- Dinner: steamed fish + cooked quinoa + steamed greens")
-    lines.append("- Snacks: hard-boiled egg, small portion cooked fruit compote")
+    lines.extend([
+        "- Breakfast: cooked oats + cooked banana + pumpkin seeds + pasteurised yogurt",
+        "- Lunch: steamed chicken breast + cooked brown rice + steamed carrot + cooked spinach",
+        "- Dinner: steamed fish + cooked quinoa/brown rice + steamed greens",
+        "- Snacks: hard-boiled egg, small portion cooked fruit compote"
+    ])
+    lines.append("\nNutritional rationale:")
+    lines.extend([
+        "- High-quality protein supports tissue repair and immune function.",
+        "- Cooked vegetables and grains improve digestibility and reduce infection risk."
+    ])
+    lines.append("\nFood safety notes:")
+    lines.extend([
+        "- Avoid raw seafood, raw milk, raw sprouts; prefer pasteurised dairy and well-cooked meats.",
+        "- Maintain good hand/food hygiene; refrigerate perishables promptly."
+    ])
     return "\n".join(lines)
 
-# Robust extractor for GPT output sections
 def extract_section(text, header):
-    pattern = rf"{header}\s*[:\-]?\s*(.*?)(?=\n(?:Summary|Questions|Nutrition|Dietary)\s*[:\-]|\Z)"
+    pattern = rf"{header}\s*[:\-]?\s*(.*?)(?=\n(?:Summary|Questions|Dietary Advice|Nutrition)\s*[:\-]|\Z)"
     m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
-    if m: return m.group(1).strip()
-    return "No findings."
+    return m.group(1).strip() if m else "No findings."
 
-# Main AI generation button
+def clean_questions_text(q_text):
+    """
+    Post-filter Questions to remove any diet/nutrition lines (safety net).
+    If cleaning would remove everything, return the original text.
+    """
+    if not q_text:
+        return q_text
+    keywords = ['diet', 'nutrition', 'food', 'menu', 'meal', 'calorie', 'protein', 'carb', 'sugar', 'supplement']
+    filtered = []
+    for line in q_text.splitlines():
+        low = line.lower()
+        if any(k in low for k in keywords):
+            # skip diet-related lines
+            continue
+        filtered.append(line)
+    cleaned = "\n".join(filtered).strip()
+    return cleaned if cleaned else q_text
+
+# -------------------------
+# UI: Upload + OCR (persisted)
+# -------------------------
+st.subheader("1) Input medical reports or lab summary")
+
+# file widget (we keep the widget; also store uploaded files to session_state)
+widget_files = st.file_uploader(
+    "Upload medical reports / imaging files (JPG/PNG/PDF). You can upload multiple files.",
+    type=["jpg", "jpeg", "png", "pdf"],
+    accept_multiple_files=True,
+    key="file_uploader"
+)
+
+# store widget files in session_state so previews remain after rerun
+if widget_files:
+    st.session_state['uploaded_files'] = widget_files
+
+# detect new upload set by filenames tuple
+curr_meta = tuple([f.name for f in st.session_state['uploaded_files']]) if st.session_state.get('uploaded_files') else None
+if curr_meta and curr_meta != st.session_state.get('uploaded_files_meta'):
+    # New files uploaded -> run OCR once and persist results
+    lab_texts_local = []
+    image_texts_local = []
+    for f in st.session_state['uploaded_files']:
+        try:
+            if f.type.startswith("image"):
+                img = Image.open(f).convert("RGB")
+                st.image(img, caption=f"Preview: {f.name}", use_column_width=True)
+                ocr_result = "\n".join(reader.readtext(np.array(img), detail=0))
+            elif f.type == "application/pdf":
+                pages = convert_from_bytes(f.read())
+                ocr_result = ""
+                for p in pages:
+                    ocr_result += "\n".join(reader.readtext(np.array(p.convert("RGB")), detail=0)) + "\n"
+            else:
+                continue
+            name = f.name.lower()
+            if any(k in name for k in ["pet", "ct", "xray", "scan"]):
+                image_texts_local.append(ocr_result)
+            else:
+                lab_texts_local.append(ocr_result)
+        except Exception as e:
+            st.error(f"OCR failed for {f.name}: {e}")
+    st.session_state['ocr_lab_texts'] = lab_texts_local
+    st.session_state['ocr_image_texts'] = image_texts_local
+    st.session_state['uploaded_files_meta'] = curr_meta
+
+# editable lab text seeded from OCR (if present)
+initial_lab_text = "\n".join(st.session_state['ocr_lab_texts']) if st.session_state['ocr_lab_texts'] else ""
+text_input = st.text_area("Or paste a short lab/test excerpt here (English preferred)", value=initial_lab_text, height=160)
+input_source = text_input.strip() if text_input and text_input.strip() else ""
+
+# persist chosen lab text
+if input_source:
+    st.session_state['all_lab_text'] = input_source
+
+# -------------------------
+# Main: Generate Summary & Dietary Advice
+# -------------------------
+st.subheader("2) Generate Summary & Dietary Advice")
 if st.button("Generate Summary & Dietary Advice"):
-    if not input_source and not lab_texts:
-        st.error("Please paste a lab/test excerpt or upload files first.")
+    if not st.session_state.get('all_lab_text'):
+        st.error("Please paste lab text or upload files first.")
     elif not client:
-        st.error("OpenAI client not configured. Please set OPENAI_API_KEY.")
+        st.error("OpenAI client not configured.")
     else:
-        with st.spinner("Generating AI output..."):
-            all_lab_text = input_source if input_source else "\n".join(lab_texts)
-            health_index = compute_health_index_with_imaging(all_lab_text, image_texts)
-            st.session_state['health_index'] = health_index
-            st.subheader("Health Index")
-            st.write(f"Combined Health Index (0-100): {health_index}")
-            
+        all_lab_text = st.session_state['all_lab_text']
+        st.session_state['health_index'] = compute_health_index_with_imaging(all_lab_text, st.session_state.get('ocr_image_texts', []))
+        with st.spinner("Generating AI summary..."):
             prompt = f"""
 You are a clinical-support assistant. Respond only in English.
-Given the patient's report text below, produce exactly three labelled sections: Summary, Questions, Dietary Advice.
+Produce exactly two labelled sections: Summary, Questions.
+DO NOT include nutrition, diet, menu, or food advice in your output — the app provides dietary advice separately.
+
 - Summary: 3-4 short sentences in plain English.
-- Questions: 3 practical questions the patient/family should ask the doctor.
-- Dietary Advice: dietitian-level, with rationale and 1-day sample menu.
+- Questions: 3 practical, clinical questions the patient/family should ask the doctor (do not ask about diet/nutrition).
 
 Patient report:
 \"\"\"{all_lab_text}\"\"\"
-
-Output headers exactly:
-Summary:
-Questions:
-Dietary Advice:
 """
             try:
                 resp = client.chat.completions.create(
                     model="gpt-3.5-turbo",
-                    messages=[{"role":"user", "content": prompt}],
+                    messages=[{"role":"user","content":prompt}],
                     max_tokens=700,
                     temperature=0.2
                 )
                 ai_text = resp.choices[0].message.content
-                summary = extract_section(ai_text, "Summary")
-                questions = extract_section(ai_text, "Questions")
-                dietary = extract_section(ai_text, "Dietary Advice")
-
-                st.session_state['summary'] = summary
-                st.session_state['questions'] = questions
-                st.session_state['dietary'] = dietary
                 st.session_state['ai_raw'] = ai_text
 
-                st.subheader("Health Summary")
-                st.write(summary)
-                st.markdown("---")
-                st.subheader("Suggested Questions for the Doctor")
-                st.write(questions)
-                st.markdown("---")
-                st.subheader("Dietary Advice")
-                st.text_area("Dietary Advice (dietitian-level)", value=dietary, height=320)
+                raw_summary = extract_section(ai_text, "Summary")
+                raw_questions = extract_section(ai_text, "Questions")
+                cleaned_questions = clean_questions_text(raw_questions)
 
-                # Optional follow-up question to refine
-                followup_q = st.text_area("Ask follow-up questions to refine advice", height=80)
-                if st.button("Refine Advice"):
-                    if followup_q.strip():
-                        with st.spinner("Refining advice..."):
-                            followup_prompt = f"""
-Patient report:
-\"\"\"{all_lab_text}\"\"\"
-Previous AI output:
-\"\"\"{ai_text}\"\"\"
-User follow-up question:
-\"\"\"{followup_q}\"\"\"
-Please refine the summary, questions, and dietary advice accordingly.
-Respond only in English, dietitian-level advice, include 1-day menu.
-"""
-                            resp2 = client.chat.completions.create(
-                                model="gpt-3.5-turbo",
-                                messages=[{"role":"user", "content": followup_prompt}],
-                                max_tokens=700,
-                                temperature=0.2
-                            )
-                            ai_text2 = resp2.choices[0].message.content
-                            summary2 = extract_section(ai_text2, "Summary")
-                            questions2 = extract_section(ai_text2, "Questions")
-                            dietary2 = extract_section(ai_text2, "Dietary Advice")
-                            st.session_state['summary'] = summary2
-                            st.session_state['questions'] = questions2
-                            st.session_state['dietary'] = dietary2
-                            st.text_area("Refined Dietary Advice", value=dietary2, height=320)
+                st.session_state['summary'] = raw_summary
+                st.session_state['questions'] = cleaned_questions
+
+                # deterministic dietary advice derived from parsed labs
+                lab_vals = parse_lab_values(all_lab_text)
+                st.session_state['dietary'] = generate_dietary_advice_from_labs(lab_vals)
+
+                st.session_state['generated'] = True
+                st.success("Summary & dietary advice generated.")
             except Exception as e:
                 st.error(f"OpenAI API call failed: {e}")
 
-# Optional: email sending
+# -------------------------
+# Display generated outputs (persisted)
+# -------------------------
+if st.session_state.get('generated'):
+    st.subheader("Health Index")
+    st.write(f"Combined Health Index (0-100): {st.session_state.get('health_index','N/A')}")
+    st.markdown("---")
+    st.subheader("Health Summary")
+    st.write(st.session_state.get('summary','No findings.'))
+    st.markdown("---")
+    st.subheader("Suggested Questions for the Doctor")
+    st.write(st.session_state.get('questions','No findings.'))
+    st.markdown("---")
+    st.subheader("Dietary Advice")
+    st.text_area("Dietary Advice (dietitian-level, copyable)", value=st.session_state.get('dietary',''), height=360)
+
+# -------------------------
+# Follow-up: Refine Advice (reads/writes session_state)
+# -------------------------
+st.subheader("3) Ask follow-up / refine advice (optional)")
+follow_up_q = st.text_area("Type follow-up question (optional):", height=80)
+if st.button("Refine Advice"):
+    if not st.session_state.get('generated'):
+        st.error("Generate initial summary first.")
+    else:
+        all_lab_text = st.session_state.get('all_lab_text','')
+        with st.spinner("Refining AI summary..."):
+            followup_prompt = f"""
+You are a clinical-support assistant. Respond only in English.
+Provide updated Summary and Questions only. DO NOT include nutrition or dietary suggestions — the app handles dietary advice separately.
+
+Patient report:
+\"\"\"{all_lab_text}\"\"\"
+
+Previous AI output:
+\"\"\"{st.session_state.get('ai_raw','')}\"\"\"
+
+Follow-up question:
+\"\"\"{follow_up_q}\"\"\"
+"""
+            try:
+                resp2 = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role":"user","content":followup_prompt}],
+                    max_tokens=700,
+                    temperature=0.2
+                )
+                ai_text2 = resp2.choices[0].message.content
+                st.session_state['ai_raw'] = ai_text2
+
+                raw_summary2 = extract_section(ai_text2, "Summary")
+                raw_questions2 = extract_section(ai_text2, "Questions")
+                cleaned_questions2 = clean_questions_text(raw_questions2)
+
+                st.session_state['summary'] = raw_summary2
+                st.session_state['questions'] = cleaned_questions2
+
+                # dietary advice remains derived from same labs (deterministic)
+                lab_vals = parse_lab_values(all_lab_text)
+                st.session_state['dietary'] = generate_dietary_advice_from_labs(lab_vals)
+                st.success("Refined summary and questions updated.")
+            except Exception as e:
+                st.error(f"Follow-up AI call failed: {e}")
+
+# show refreshed view after refine
+if st.session_state.get('generated'):
+    st.markdown("### Current Summary / Questions / Dietary Advice")
+    st.write(st.session_state.get('summary',''))
+    st.write(st.session_state.get('questions',''))
+    st.text_area("Dietary Advice (copyable)", value=st.session_state.get('dietary',''), height=320)
+
+# -------------------------
+# Optional email sending
+# -------------------------
 st.markdown("---")
-st.subheader("Optional: Send summary via email")
+st.subheader("4) Optional: send final report via email")
 send_email = st.checkbox("Send final report via email")
 if send_email:
-    to_email = st.text_input("Recipient Email")
-    if st.button("Send Email") and to_email:
-        try:
-            msg = EmailMessage()
-            msg['Subject'] = "Personalized Health Summary & Dietary Advice"
-            msg['From'] = "your_email@example.com"
-            msg['To'] = to_email
-            body = (
-                f"Health Index: {st.session_state.get('health_index','N/A')}\n\n"
-                f"Summary:\n{st.session_state.get('summary','No findings.')}\n\n"
-                f"Questions:\n{st.session_state.get('questions','No findings.')}\n\n"
-                f"Dietary Advice:\n{st.session_state.get('dietary','No findings.')}"
-            )
-            msg.set_content(body)
-            with smtplib.SMTP('localhost') as server:
-                server.send_message(msg)
-            st.success(f"Email sent to {to_email}")
-        except Exception as e:
-            st.error(f"Failed to send email: {e}")
+    recipient = st.text_input("Recipient email address")
+    if st.button("Send Email"):
+        if not recipient:
+            st.error("Enter recipient email address first.")
+        elif not st.session_state.get('generated'):
+            st.error("Generate a report first.")
+        else:
+            try:
+                msg = EmailMessage()
+                msg['Subject'] = "Personalized Health Summary & Dietary Advice"
+                sender = st.secrets.get("EMAIL_SENDER", "noreply@example.com")
+                msg['From'] = sender
+                msg['To'] = recipient
+                body = (
+                    f"Health Index: {st.session_state.get('health_index','N/A')}\n\n"
+                    f"Summary:\n{st.session_state.get('summary','No findings.')}\n\n"
+                    f"Questions:\n{st.session_state.get('questions','No findings.')}\n\n"
+                    f"Dietary Advice:\n{st.session_state.get('dietary','No findings.')}"
+                )
+                msg.set_content(body)
+
+                smtp_host = st.secrets.get("SMTP_HOST", "localhost")
+                smtp_port = int(st.secrets.get("SMTP_PORT", 25))
+                smtp_user = st.secrets.get("SMTP_USER")
+                smtp_pass = st.secrets.get("SMTP_PASS")
+
+                with smtplib.SMTP(smtp_host, smtp_port) as server:
+                    if smtp_user and smtp_pass:
+                        server.starttls()
+                        server.login(smtp_user, smtp_pass)
+                    server.send_message(msg)
+                st.success(f"Report sent to {recipient}")
+            except Exception as e:
+                st.error(f"Failed to send email: {e}")
+
 
 
 
