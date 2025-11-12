@@ -37,9 +37,9 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 # Session state defaults
 # -------------------------
 if 'uploaded_files_meta' not in st.session_state:
-    st.session_state['uploaded_files_meta'] = None  # simple filename tuple for detecting changes
+    st.session_state['uploaded_files_meta'] = None
 if 'uploaded_files' not in st.session_state:
-    st.session_state['uploaded_files'] = None       # store the raw uploaded file objects (so widget shows them)
+    st.session_state['uploaded_files'] = None
 if 'ocr_lab_texts' not in st.session_state:
     st.session_state['ocr_lab_texts'] = []
 if 'ocr_image_texts' not in st.session_state:
@@ -190,10 +190,6 @@ def extract_section(text, header):
     return m.group(1).strip() if m else "No findings."
 
 def clean_questions_text(q_text):
-    """
-    Post-filter Questions to remove any diet/nutrition lines (safety net).
-    If cleaning would remove everything, return the original text.
-    """
     if not q_text:
         return q_text
     keywords = ['diet', 'nutrition', 'food', 'menu', 'meal', 'calorie', 'protein', 'carb', 'sugar', 'supplement']
@@ -201,7 +197,6 @@ def clean_questions_text(q_text):
     for line in q_text.splitlines():
         low = line.lower()
         if any(k in low for k in keywords):
-            # skip diet-related lines
             continue
         filtered.append(line)
     cleaned = "\n".join(filtered).strip()
@@ -212,7 +207,6 @@ def clean_questions_text(q_text):
 # -------------------------
 st.subheader("1) Input medical reports or lab summary")
 
-# file widget (we keep the widget; also store uploaded files to session_state)
 widget_files = st.file_uploader(
     "Upload medical reports / imaging files (JPG/PNG/PDF). You can upload multiple files.",
     type=["jpg", "jpeg", "png", "pdf"],
@@ -220,14 +214,11 @@ widget_files = st.file_uploader(
     key="file_uploader"
 )
 
-# store widget files in session_state so previews remain after rerun
 if widget_files:
     st.session_state['uploaded_files'] = widget_files
 
-# detect new upload set by filenames tuple
 curr_meta = tuple([f.name for f in st.session_state['uploaded_files']]) if st.session_state.get('uploaded_files') else None
 if curr_meta and curr_meta != st.session_state.get('uploaded_files_meta'):
-    # New files uploaded -> run OCR once and persist results
     lab_texts_local = []
     image_texts_local = []
     for f in st.session_state['uploaded_files']:
@@ -254,12 +245,9 @@ if curr_meta and curr_meta != st.session_state.get('uploaded_files_meta'):
     st.session_state['ocr_image_texts'] = image_texts_local
     st.session_state['uploaded_files_meta'] = curr_meta
 
-# editable lab text seeded from OCR (if present)
 initial_lab_text = "\n".join(st.session_state['ocr_lab_texts']) if st.session_state['ocr_lab_texts'] else ""
 text_input = st.text_area("Or paste a short lab/test excerpt here (English preferred)", value=initial_lab_text, height=160)
 input_source = text_input.strip() if text_input and text_input.strip() else ""
-
-# persist chosen lab text
 if input_source:
     st.session_state['all_lab_text'] = input_source
 
@@ -304,7 +292,6 @@ Patient report:
                 st.session_state['summary'] = raw_summary
                 st.session_state['questions'] = cleaned_questions
 
-                # deterministic dietary advice derived from parsed labs
                 lab_vals = parse_lab_values(all_lab_text)
                 st.session_state['dietary'] = generate_dietary_advice_from_labs(lab_vals)
 
@@ -321,7 +308,7 @@ if st.session_state.get('generated'):
     st.write(f"Combined Health Index (0-100): {st.session_state.get('health_index','N/A')}")
     st.markdown("---")
     st.subheader("Health Summary")
-    st.write(st.session_state.get('summary','No findings.'))
+    st.write(st.session_state.get('summary','No findings.'))  # only summary content shown here
     st.markdown("---")
     st.subheader("Suggested Questions for the Doctor")
     st.write(st.session_state.get('questions','No findings.'))
@@ -330,59 +317,134 @@ if st.session_state.get('generated'):
     st.text_area("Dietary Advice (dietitian-level, copyable)", value=st.session_state.get('dietary',''), height=360)
 
 # -------------------------
-# Follow-up: Refine Advice (reads/writes session_state)
+# Follow-up: what to refine?
 # -------------------------
 st.subheader("3) Ask follow-up / refine advice (optional)")
-follow_up_q = st.text_area("Type follow-up question (optional):", height=80)
-if st.button("Refine Advice"):
+refine_choice = st.selectbox("Refine which part?", ["Dietary Advice", "Suggested Questions for the Doctor", "Both (Summary + Questions + Dietary Advice)"])
+follow_up_q = st.text_area("Type follow-up question (optional):", height=90)
+
+if st.button("Refine Selected"):
     if not st.session_state.get('generated'):
         st.error("Generate initial summary first.")
     else:
         all_lab_text = st.session_state.get('all_lab_text','')
-        with st.spinner("Refining AI summary..."):
-            followup_prompt = f"""
+        if not all_lab_text:
+            st.error("No lab text found in session.")
+        else:
+            with st.spinner("Refining..."):
+                # Build prompt according to selection
+                if refine_choice == "Dietary Advice":
+                    # Request only a Diet section from the model (we will save it under dietary)
+                    prompt_ref = f"""
+You are a clinical dietitian-level assistant. Respond only in English.
+Given the patient report below, produce a labelled section: Dietary Advice.
+- Dietary Advice: practical, food-based, dietitian-level guidance including a 1-day sample menu, rationale, and food-safety notes.
+Do NOT include Summary or Questions.
+
+Patient report:
+\"\"\"{all_lab_text}\"\"\"
+User follow-up request:
+\"\"\"{follow_up_q}\"\"\"
+"""
+                    try:
+                        resp = client.chat.completions.create(
+                            model="gpt-3.5-turbo",
+                            messages=[{"role":"user","content":prompt_ref}],
+                            max_tokens=900,
+                            temperature=0.2
+                        )
+                        ai_text = resp.choices[0].message.content
+                        # try to extract Dietary Advice; fallback to whole text
+                        dietary_section = extract_section(ai_text, "Dietary Advice")
+                        # if model didn't use header, use entire response
+                        dietary_section = dietary_section if dietary_section and dietary_section!="No findings." else ai_text.strip()
+                        st.session_state['dietary'] = dietary_section
+                        st.session_state['ai_raw'] = ai_text
+                        st.success("Dietary advice updated.")
+                    except Exception as e:
+                        st.error(f"Refine (dietary) failed: {e}")
+
+                elif refine_choice == "Suggested Questions for the Doctor":
+                    prompt_ref = f"""
 You are a clinical-support assistant. Respond only in English.
-Provide updated Summary and Questions only. DO NOT include nutrition or dietary suggestions — the app handles dietary advice separately.
+Provide updated Summary and Questions only. DO NOT include dietary advice.
 
 Patient report:
 \"\"\"{all_lab_text}\"\"\"
 
-Previous AI output:
+Previous AI output (for context):
 \"\"\"{st.session_state.get('ai_raw','')}\"\"\"
 
-Follow-up question:
+User follow-up:
 \"\"\"{follow_up_q}\"\"\"
 """
-            try:
-                resp2 = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role":"user","content":followup_prompt}],
-                    max_tokens=700,
-                    temperature=0.2
-                )
-                ai_text2 = resp2.choices[0].message.content
-                st.session_state['ai_raw'] = ai_text2
+                    try:
+                        resp = client.chat.completions.create(
+                            model="gpt-3.5-turbo",
+                            messages=[{"role":"user","content":prompt_ref}],
+                            max_tokens=700,
+                            temperature=0.2
+                        )
+                        ai_text = resp.choices[0].message.content
+                        raw_summary = extract_section(ai_text, "Summary")
+                        raw_questions = extract_section(ai_text, "Questions")
+                        cleaned_questions = clean_questions_text(raw_questions)
+                        st.session_state['summary'] = raw_summary
+                        st.session_state['questions'] = cleaned_questions
+                        st.session_state['ai_raw'] = ai_text
+                        st.success("Summary and questions updated.")
+                    except Exception as e:
+                        st.error(f"Refine (questions) failed: {e}")
 
-                raw_summary2 = extract_section(ai_text2, "Summary")
-                raw_questions2 = extract_section(ai_text2, "Questions")
-                cleaned_questions2 = clean_questions_text(raw_questions2)
+                else:  # Both
+                    prompt_ref = f"""
+You are a clinical-support assistant. Respond only in English.
+Provide updated Summary, Questions, and Dietary Advice (label each section with the headers: Summary, Questions, Dietary Advice).
+- Summary: 2-4 short sentences.
+- Questions: 3 practical questions for the doctor (do NOT include diet instructions here).
+- Dietary Advice: dietitian-level, 1-day sample menu, rationale, and food-safety notes.
 
-                st.session_state['summary'] = raw_summary2
-                st.session_state['questions'] = cleaned_questions2
+Patient report:
+\"\"\"{all_lab_text}\"\"\"
 
-                # dietary advice remains derived from same labs (deterministic)
-                lab_vals = parse_lab_values(all_lab_text)
-                st.session_state['dietary'] = generate_dietary_advice_from_labs(lab_vals)
-                st.success("Refined summary and questions updated.")
-            except Exception as e:
-                st.error(f"Follow-up AI call failed: {e}")
+Previous AI output (for context):
+\"\"\"{st.session_state.get('ai_raw','')}\"\"\"
+User follow-up:
+\"\"\"{follow_up_q}\"\"\"
+"""
+                    try:
+                        resp = client.chat.completions.create(
+                            model="gpt-3.5-turbo",
+                            messages=[{"role":"user","content":prompt_ref}],
+                            max_tokens=1000,
+                            temperature=0.2
+                        )
+                        ai_text = resp.choices[0].message.content
+                        raw_summary = extract_section(ai_text, "Summary")
+                        raw_questions = extract_section(ai_text, "Questions")
+                        dietary_section = extract_section(ai_text, "Dietary Advice")
+                        # fallback if model didn't use header
+                        if not dietary_section or dietary_section=="No findings.":
+                            # try to pull Nutrition or entire response
+                            dietary_section = extract_section(ai_text, "Nutrition")
+                        dietary_section = dietary_section if dietary_section and dietary_section!="No findings." else ai_text.strip()
+                        cleaned_questions = clean_questions_text(raw_questions)
+                        st.session_state['summary'] = raw_summary
+                        st.session_state['questions'] = cleaned_questions
+                        st.session_state['dietary'] = dietary_section
+                        st.session_state['ai_raw'] = ai_text
+                        st.success("Summary, questions and dietary advice updated.")
+                    except Exception as e:
+                        st.error(f"Refine (both) failed: {e}")
 
-# show refreshed view after refine
+# After refine, show current values (if generated)
 if st.session_state.get('generated'):
-    st.markdown("### Current Summary / Questions / Dietary Advice")
+    st.markdown("### Current Summary / Questions / Dietary Advice (most recent)")
     st.write(st.session_state.get('summary',''))
     st.write(st.session_state.get('questions',''))
     st.text_area("Dietary Advice (copyable)", value=st.session_state.get('dietary',''), height=320)
+    with st.expander("Full AI output (latest)"):
+        st.code(st.session_state.get('ai_raw',''))
 
 # -------------------------
 # Optional email sending
@@ -425,6 +487,7 @@ if send_email:
                 st.success(f"Report sent to {recipient}")
             except Exception as e:
                 st.error(f"Failed to send email: {e}")
+
 
 
 
