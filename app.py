@@ -1,25 +1,31 @@
-# app.py
+# app.py (defensive version - avoids crashing when EasyOCR/model download or other infra issues occur)
 import streamlit as st
 import os
 import re
+import traceback
 from openai import OpenAI
 from PIL import Image
-from pdf2image import convert_from_bytes
+from pdf2image import convert_from_bytes, exceptions as pdf_exceptions
 import numpy as np
-import easyocr
 import smtplib
 from email.message import EmailMessage
+
+# Try to import easyocr but allow failure
+try:
+    import easyocr
+    EASYOCR_AVAILABLE = True
+except Exception as e:
+    easyocr = None
+    EASYOCR_AVAILABLE = False
 
 # -------------------------
 # Config / Initialization
 # -------------------------
-reader = easyocr.Reader(['en', 'ch_sim'], gpu=False)
-
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 st.title("AI-Driven Personalized Cancer Care Chatbot")
 st.write("Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get an English health summary, doctor questions, and dietitian-level dietary advice.")
 
-# OpenAI client setup
+# OpenAI client setup (same logic as before)
 OPENAI_API_KEY = None
 try:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -31,7 +37,28 @@ if not OPENAI_API_KEY:
     if api_key_input:
         OPENAI_API_KEY = api_key_input
 
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+client = None
+if OPENAI_API_KEY:
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        st.error("OpenAI client initialization failed. Check your API key and package version.")
+        st.exception(e)
+
+# Initialize EasyOCR reader lazily and safely
+reader = None
+reader_init_error = None
+if EASYOCR_AVAILABLE:
+    try:
+        # Lazy initialize only when needed later to avoid long blocking at app start.
+        # But try a quick import-init now — if it fails, catch and continue.
+        # We set gpu=False to avoid CUDA/GPU issues on host.
+        reader = easyocr.Reader(['en', 'ch_sim'], gpu=False)
+    except Exception as e:
+        reader = None
+        reader_init_error = e
+else:
+    reader_init_error = RuntimeError("easyocr not installed in environment.")
 
 # -------------------------
 # Session state defaults
@@ -55,7 +82,7 @@ for k, v in defaults.items():
         st.session_state[k] = v
 
 # -------------------------
-# Helpers
+# Helpers (unchanged logic, defensive)
 # -------------------------
 def compute_health_index_smart(report_text):
     score = 50
@@ -76,7 +103,7 @@ def compute_health_index_with_imaging(report_texts, image_reports_texts=None):
     if image_reports_texts:
         deductions = 0
         for text in image_reports_texts:
-            t = text.lower()
+            t = (text or "").lower()
             if any(k in t for k in ["metastasis", "lesion", "tumor growth", "progression"]):
                 deductions += 10
             if any(k in t for k in ["stable", "no abnormality", "remission", "no evidence of disease"]):
@@ -201,7 +228,24 @@ def append_chat(role, text):
     st.session_state['chat_history'].append((role, text))
 
 # -------------------------
-# UI: Upload + OCR (persisted)
+# UI: show easyocr init status & debug toggle
+# -------------------------
+st.sidebar.markdown("### Debug / status")
+st.sidebar.write(f"easyocr installed: {EASYOCR_AVAILABLE}")
+st.sidebar.write(f"easyocr reader ready: {bool(reader)}")
+if reader_init_error:
+    st.sidebar.error("EasyOCR init error (see main UI).")
+
+if st.sidebar.checkbox("Show debug info (logs)"):
+    st.sidebar.write("OpenAI key present:", bool(OPENAI_API_KEY))
+    st.sidebar.write("Client initialized:", bool(client))
+    st.sidebar.write("Session generated:", st.session_state.get('generated'))
+    st.sidebar.write("Session keys:", list(st.session_state.keys()))
+    if reader_init_error:
+        st.sidebar.exception(reader_init_error)
+
+# -------------------------
+# UI: Upload + OCR (defensive)
 # -------------------------
 st.subheader("1) Input medical reports or lab summary")
 
@@ -212,55 +256,82 @@ widget_files = st.file_uploader(
     key="file_uploader"
 )
 
+# persist widget uploads
 if widget_files:
     st.session_state['uploaded_files'] = widget_files
 
+# detect new set
 curr_meta = tuple([f.name for f in st.session_state['uploaded_files']]) if st.session_state.get('uploaded_files') else None
 if curr_meta and curr_meta != st.session_state.get('uploaded_files_meta'):
+    # run OCR only if reader is initialized; otherwise store a message and let user paste the text manually
     lab_texts_local = []
     image_texts_local = []
-    for f in st.session_state['uploaded_files']:
-        try:
-            if f.type.startswith("image"):
-                img = Image.open(f).convert("RGB")
-                st.image(img, caption=f"Preview: {f.name}", use_column_width=True)
-                ocr_result = "\n".join(reader.readtext(np.array(img), detail=0))
-            elif f.type == "application/pdf":
-                pages = convert_from_bytes(f.read())
-                ocr_result = ""
-                for p in pages:
-                    ocr_result += "\n".join(reader.readtext(np.array(p.convert("RGB")), detail=0)) + "\n"
-            else:
-                continue
-            name = f.name.lower()
-            if any(k in name for k in ["pet", "ct", "xray", "scan"]):
-                image_texts_local.append(ocr_result)
-            else:
-                lab_texts_local.append(ocr_result)
-        except Exception as e:
-            st.error(f"OCR failed for {f.name}: {e}")
+    if not reader:
+        st.warning("EasyOCR reader not available. OCR will be skipped — paste lab text manually below. (Check sidebar for EasyOCR init error.)")
+    else:
+        for f in st.session_state['uploaded_files']:
+            try:
+                if f.type.startswith("image"):
+                    img = Image.open(f).convert("RGB")
+                    st.image(img, caption=f"Preview: {f.name}", use_column_width=True)
+                    try:
+                        ocr_result = "\n".join(reader.readtext(np.array(img), detail=0))
+                    except Exception as e:
+                        ocr_result = ""
+                        st.error(f"OCR failed on image {f.name}: {e}")
+                elif f.type == "application/pdf":
+                    try:
+                        pages = convert_from_bytes(f.read())
+                    except pdf_exceptions.PDFPageCountError as e:
+                        pages = []
+                        st.error(f"pdf2image failed for {f.name}: {e}")
+                    ocr_result = ""
+                    for p in pages:
+                        try:
+                            arr = np.array(p.convert("RGB"))
+                            ocr_result += "\n".join(reader.readtext(arr, detail=0)) + "\n"
+                        except Exception as e:
+                            st.error(f"OCR failed on PDF page for {f.name}: {e}")
+                else:
+                    continue
+                name = f.name.lower()
+                if any(k in name for k in ["pet", "ct", "xray", "scan"]):
+                    image_texts_local.append(ocr_result)
+                else:
+                    lab_texts_local.append(ocr_result)
+            except Exception as e:
+                st.error(f"OCR processing failed for {f.name}: {e}")
     st.session_state['ocr_lab_texts'] = lab_texts_local
     st.session_state['ocr_image_texts'] = image_texts_local
     st.session_state['uploaded_files_meta'] = curr_meta
 
+# editable lab text seeded from OCR (if present), or empty if OCR skipped
 initial_lab_text = "\n".join(st.session_state['ocr_lab_texts']) if st.session_state['ocr_lab_texts'] else ""
+if not initial_lab_text and reader_init_error:
+    # show short hint so user knows OCR failed and manual paste is ok
+    initial_lab_text = ""
 text_input = st.text_area("Or paste a short lab/test excerpt here (English preferred)", value=initial_lab_text, height=160)
 input_source = text_input.strip() if text_input and text_input.strip() else ""
 if input_source:
     st.session_state['all_lab_text'] = input_source
 
 # -------------------------
-# Main: Generate Summary & Dietary Advice
+# Main: Generate Summary & Dietary Advice (defensive)
 # -------------------------
 st.subheader("2) Generate Summary & Dietary Advice")
 if st.button("Generate Summary & Dietary Advice"):
     if not st.session_state.get('all_lab_text'):
         st.error("Please paste lab text or upload files first.")
     elif not client:
-        st.error("OpenAI client not configured.")
+        st.error("OpenAI client not configured. Check OPENAI_API_KEY.")
     else:
         all_lab_text = st.session_state['all_lab_text']
-        st.session_state['health_index'] = compute_health_index_with_imaging(all_lab_text, st.session_state.get('ocr_image_texts', []))
+        try:
+            st.session_state['health_index'] = compute_health_index_with_imaging(all_lab_text, st.session_state.get('ocr_image_texts', []))
+        except Exception as e:
+            st.error("Health index computation failed.")
+            st.exception(e)
+
         with st.spinner("Generating AI summary..."):
             prompt = f"""
 You are a clinical-support assistant. Respond only in English.
@@ -280,10 +351,18 @@ Patient report:
                     max_tokens=700,
                     temperature=0.2
                 )
-                ai_text = resp.choices[0].message.content
+            except Exception as e:
+                st.error("OpenAI API call failed. See exception below.")
+                st.exception(e)
+            else:
+                try:
+                    ai_text = resp.choices[0].message.content
+                except Exception:
+                    ai_text = str(resp)
                 st.session_state['ai_raw'] = ai_text
                 append_chat("assistant", ai_text)
 
+                # extract and post-process
                 raw_summary = extract_section(ai_text, "Summary")
                 raw_questions = extract_section(ai_text, "Questions")
                 cleaned_questions = clean_questions_text(raw_questions)
@@ -291,22 +370,29 @@ Patient report:
                 st.session_state['summary'] = raw_summary
                 st.session_state['questions'] = cleaned_questions
 
-                lab_vals = parse_lab_values(all_lab_text)
-                st.session_state['dietary'] = generate_dietary_advice_from_labs(lab_vals)
+                lab_vals = {}
+                try:
+                    lab_vals = parse_lab_values(all_lab_text)
+                except Exception as e:
+                    st.warning("Lab parsing had issues; dietary advice will be generic.")
+                    st.exception(e)
+
+                try:
+                    st.session_state['dietary'] = generate_dietary_advice_from_labs(lab_vals)
+                except Exception as e:
+                    st.error("Dietary advice generation failed.")
+                    st.exception(e)
 
                 st.session_state['generated'] = True
                 st.success("Summary & dietary advice generated.")
-            except Exception as e:
-                st.error(f"OpenAI API call failed: {e}")
 
 # -------------------------
-# Display generated outputs (persisted)
+# Display generated outputs
 # -------------------------
 if st.session_state.get('generated'):
     st.subheader("Health Index")
     st.write(f"Combined Health Index (0-100): {st.session_state.get('health_index','N/A')}")
     st.markdown("---")
-    # Columns view: Summary | Questions | Dietary
     cols = st.columns([2,2,3])
     with cols[0]:
         st.subheader("Summary")
@@ -321,7 +407,7 @@ if st.session_state.get('generated'):
         st.code(st.session_state.get('ai_raw',''))
 
 # -------------------------
-# Follow-up: Refine (Dietary / Questions / Both)
+# Follow-up: Refine (Dietary / Questions / Both) - defensive
 # -------------------------
 st.markdown("---")
 st.subheader("3) Ask follow-up / refine advice (optional)")
@@ -337,8 +423,9 @@ if st.button("Refine Selected"):
             st.error("No lab text found in session.")
         else:
             with st.spinner("Refining..."):
-                if refine_choice == "Dietary Advice":
-                    prompt_ref = f"""
+                try:
+                    if refine_choice == "Dietary Advice":
+                        prompt_ref = f"""
 You are a clinical dietitian-level assistant. Respond only in English.
 Given the patient report below, produce a labelled section: Dietary Advice.
 - Dietary Advice: practical, food-based, dietitian-level guidance including a 1-day sample menu, rationale, and food-safety notes.
@@ -350,7 +437,6 @@ Patient report:
 User follow-up request:
 \"\"\"{follow_up_q}\"\"\"
 """
-                    try:
                         resp = client.chat.completions.create(
                             model="gpt-3.5-turbo",
                             messages=[{"role":"user","content":prompt_ref}],
@@ -365,11 +451,9 @@ User follow-up request:
                         st.session_state['dietary'] = dietary_section
                         st.session_state['generated'] = True
                         st.success("Dietary advice updated.")
-                    except Exception as e:
-                        st.error(f"Refine (dietary) failed: {e}")
 
-                elif refine_choice == "Suggested Questions for the Doctor":
-                    prompt_ref = f"""
+                    elif refine_choice == "Suggested Questions for the Doctor":
+                        prompt_ref = f"""
 You are a clinical-support assistant. Respond only in English.
 Provide updated Summary and Questions only. DO NOT include dietary advice.
 
@@ -382,7 +466,6 @@ Previous AI output:
 User follow-up:
 \"\"\"{follow_up_q}\"\"\"
 """
-                    try:
                         resp = client.chat.completions.create(
                             model="gpt-3.5-turbo",
                             messages=[{"role":"user","content":prompt_ref}],
@@ -394,9 +477,7 @@ User follow-up:
                         append_chat("assistant", ai_text)
                         raw_summary = extract_section(ai_text, "Summary")
                         raw_questions = extract_section(ai_text, "Questions")
-                        # fallback: if extraction fails, use full ai_text
                         if (raw_summary == "No findings.") and (raw_questions == "No findings."):
-                            # use full ai_text as fallback for visibility
                             raw_summary = st.session_state.get('summary','')
                             raw_questions = ai_text
                         cleaned_questions = clean_questions_text(raw_questions)
@@ -404,11 +485,9 @@ User follow-up:
                         st.session_state['questions'] = cleaned_questions
                         st.session_state['generated'] = True
                         st.success("Summary and questions updated.")
-                    except Exception as e:
-                        st.error(f"Refine (questions) failed: {e}")
 
-                else:  # Both
-                    prompt_ref = f"""
+                    else:  # Both
+                        prompt_ref = f"""
 You are a clinical-support assistant. Respond only in English.
 Provide updated Summary, Questions, and Dietary Advice (label each section with: Summary, Questions, Dietary Advice).
 - Summary: 2-4 short sentences.
@@ -424,7 +503,6 @@ Previous AI output:
 User follow-up:
 \"\"\"{follow_up_q}\"\"\"
 """
-                    try:
                         resp = client.chat.completions.create(
                             model="gpt-3.5-turbo",
                             messages=[{"role":"user","content":prompt_ref}],
@@ -438,7 +516,6 @@ User follow-up:
                         raw_questions = extract_section(ai_text, "Questions")
                         dietary_section = extract_section(ai_text, "Dietary Advice")
                         if (raw_summary == "No findings.") and (raw_questions == "No findings."):
-                            # fallback
                             raw_summary = st.session_state.get('summary','')
                             raw_questions = ai_text
                         if not dietary_section or dietary_section == "No findings.":
@@ -450,32 +527,19 @@ User follow-up:
                         st.session_state['dietary'] = dietary_section
                         st.session_state['generated'] = True
                         st.success("Summary, questions and dietary advice updated.")
-                    except Exception as e:
-                        st.error(f"Refine (both) failed: {e}")
+                except Exception as e:
+                    st.error("Refine call failed. See exception below.")
+                    st.exception(e)
 
-# show current values after refine (columns above handle display)
-if st.session_state.get('generated'):
-    st.markdown("### Current Summary / Questions / Dietary Advice (most recent)")
-    cols2 = st.columns([2,2,3])
-    with cols2[0]:
-        st.subheader("Summary (latest)")
-        st.write(st.session_state.get('summary',''))
-    with cols2[1]:
-        st.subheader("Questions (latest)")
-        st.write(st.session_state.get('questions',''))
-    with cols2[2]:
-        st.subheader("Dietary Advice (copyable)")
-        st.text_area("Dietary Advice", value=st.session_state.get('dietary',''), height=260)
-    with st.expander("Full AI output (latest)"):
-        st.code(st.session_state.get('ai_raw',''))
-
+# -------------------------
 # Optional: chat history debug view
+# -------------------------
 if st.checkbox("Show chat history (debug)"):
     for role, message in st.session_state.get('chat_history', []):
         if role == "user":
             st.markdown(f"**You:** {message}")
         else:
-            st.markdown(f"**Assistant:**")
+            st.markdown("**Assistant:**")
             st.code(message)
 
 # -------------------------
@@ -518,7 +582,9 @@ if send_email:
                     server.send_message(msg)
                 st.success(f"Report sent to {recipient}")
             except Exception as e:
-                st.error(f"Failed to send email: {e}")
+                st.error("Failed to send email. See exception below.")
+                st.exception(e)
+
 
 
 
