@@ -10,14 +10,13 @@ import easyocr
 from twilio.rest import Client as TwilioClient
 
 # ===== Initialize EasyOCR reader =====
-reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)  # GPU disabled for Streamlit Cloud
+reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
 
 # ===== Streamlit page config =====
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 st.title("🧠 AI-Driven Personalized Cancer Care Chatbot")
 st.write(
-    "Upload medical reports or imaging files (JPG/PNG/PDF) or paste a short lab/test excerpt. "
-    "Click Generate to get health summary, suggested doctor questions, nutrition advice and dietary deep-dive when needed."
+    "Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get health summary, questions for doctor, nutrition advice and (when flagged) a Dietary Deep Dive."
 )
 
 # ===== OpenAI API key and client setup =====
@@ -35,7 +34,7 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-# ===== Twilio Setup (Optional) =====
+# ===== Twilio (optional) =====
 twilio_client = None
 if "TWILIO_ACCOUNT_SID" in st.secrets and "TWILIO_AUTH_TOKEN" in st.secrets:
     try:
@@ -60,14 +59,15 @@ if uploaded_files:
     for uploaded_file in uploaded_files:
         try:
             if uploaded_file.type.startswith("image"):
-                img = Image.open(uploaded_file)
+                img = Image.open(uploaded_file).convert("RGB")
                 st.image(img, caption=f"Preview: {uploaded_file.name}", use_column_width=True)
                 ocr_result = "\n".join(reader.readtext(np.array(img), detail=0))
             elif uploaded_file.type == "application/pdf":
                 pages = convert_from_bytes(uploaded_file.read())
                 ocr_result = ""
                 for page in pages:
-                    ocr_result += "\n".join(reader.readtext(np.array(page), detail=0)) + "\n"
+                    page_arr = np.array(page.convert("RGB"))
+                    ocr_result += "\n".join(reader.readtext(page_arr, detail=0)) + "\n"
             else:
                 st.warning(f"{uploaded_file.name} is not a supported file type.")
                 continue
@@ -77,7 +77,6 @@ if uploaded_files:
                 image_texts.append(ocr_result)
             else:
                 lab_texts.append(ocr_result)
-
         except Exception as e:
             st.error(f"OCR failed for {uploaded_file.name}: {e}")
 
@@ -87,7 +86,7 @@ if lab_texts:
 
 input_source = text_input.strip() if text_input and text_input.strip() else None
 
-# ===== Health Index Calculation (unchanged) =====
+# ===== Health Index Calculation =====
 def compute_health_index_smart(report_text):
     score = 50
     keywords_positive = ["normal", "stable", "remission", "improved"]
@@ -119,35 +118,22 @@ def compute_health_index_with_imaging(report_texts, image_reports_texts=None):
     combined_score = lab_score * 0.7 + image_score * 0.3
     return round(combined_score, 1)
 
-# ===== New: Lab parsing helper =====
+# ===== Lab parsing helper =====
 def parse_lab_values(text):
-    """
-    Try to extract numeric lab values commonly used:
-      - Hemoglobin (g/dL)
-      - WBC (10^9/L)
-      - Neutrophils (absolute or %)
-      - Platelets (10^9/L)
-      - Glucose (mmol/L or mg/dL)
-    Returns a dict of extracted floats or None.
-    """
     if not text:
         return {}
     t = text.lower()
     results = {}
 
-    # Helper to search patterns with optional units and commas
     def find_one(patterns):
         for p in patterns:
             m = re.search(p, t, flags=re.IGNORECASE)
             if m:
-                # try group 1 or 2
                 for g in (1,2,3):
                     try:
                         val = m.group(g)
                         if val:
-                            # remove commas
                             val = val.replace(",", "")
-                            # extract first numeric sequence
                             num = re.search(r"[-+]?\d*\.?\d+", val)
                             if num:
                                 return float(num.group(0))
@@ -155,50 +141,27 @@ def parse_lab_values(text):
                         continue
         return None
 
-    # Hemoglobin (g/dL)
     results['hb_g_dl'] = find_one([r"hemoglobin[:\s]*([\d\.]+)", r"hgb[:\s]*([\d\.]+)"])
-
-    # WBC (10^9/L) or cells per mm3 — common formats
-    results['wbc'] = find_one([
-        r"wbc[:\s]*([\d\.]+)", 
-        r"white blood cell[s]?:[:\s]*([\d\.]+)",
-        r"wbc\s*count[:\s]*([\d\.]+)"
-    ])
-
-    # Neutrophils absolute (if absolute given) or percent (if percent given)
-    results['neutrophil_abs'] = find_one([
-        r"neutrophil[s]?\s*(?:absolute)?[:\s]*([\d\.]+)",
-        r"neutrophil count[:\s]*([\d\.]+)"])
-    # neutrophil% 
+    results['wbc'] = find_one([r"wbc[:\s]*([\d\.]+)", r"white blood cell[s]?:[:\s]*([\d\.]+)", r"wbc count[:\s]*([\d\.]+)"])
+    results['neutrophil_abs'] = find_one([r"neutrophil[s]?\s*(?:absolute)?[:\s]*([\d\.]+)", r"neutrophil count[:\s]*([\d\.]+)"])
     neut_percent = find_one([r"neutrophil[s]?\s*%\s*[:\s]*([\d\.]+)", r"neutrophil[s]?\s*percent[:\s]*([\d\.]+)"])
     if neut_percent and results.get('wbc'):
-        # convert percent -> absolute (approx)
         try:
-            results['neutrophil_abs_calculated'] = (neut_percent/100.0) * results['wbc']
+            results['neutrophil_abs_calculated'] = (neut_percent / 100.0) * results['wbc']
         except:
             results['neutrophil_abs_calculated'] = None
-
-    # Platelets
     results['plt'] = find_one([r"platelet[s]?:[:\s]*([\d\.]+)", r"plt[:\s]*([\d\.]+)"])
-
-    # Glucose (could be mmol/L or mg/dL)
     results['glucose'] = find_one([r"glucose[:\s]*([\d\.]+)", r"fasting glucose[:\s]*([\d\.]+)"])
-
     return results
 
-# ===== New: Dietary Deep Dive generator (EN + CN) =====
+# ===== Dietary Deep Dive content generator =====
 def generate_dietary_deep_dive(lab_vals):
-    """
-    Given parsed lab values, produce a targeted dietary deep dive.
-    Returns dict with 'cn' and 'en' keys containing text.
-    """
     cn_lines = []
     en_lines = []
 
     cn_lines.append("【诊断提示与总览】")
     en_lines.append("【Clinical note & overview】")
 
-    # Example: neutropenia / low WBC
     wbc = lab_vals.get('wbc')
     neut = lab_vals.get('neutrophil_abs') or lab_vals.get('neutrophil_abs_calculated')
     hb = lab_vals.get('hb_g_dl')
@@ -206,8 +169,8 @@ def generate_dietary_deep_dive(lab_vals):
     glu = lab_vals.get('glucose')
 
     neutropenia_flag = False
+    severity = None
     if neut is not None:
-        # neut absolute often in 10^9/L; thresholds: <1.5 mild, <1.0 moderate, <0.5 severe
         if neut < 1.5:
             neutropenia_flag = True
             if neut < 0.5:
@@ -219,95 +182,85 @@ def generate_dietary_deep_dive(lab_vals):
         else:
             severity = None
     elif wbc is not None:
-        # fallback: if total WBC low
         if wbc < 3.0:
             neutropenia_flag = True
             severity = "possible (WBC low)"
         else:
             severity = None
-    else:
-        severity = None
 
     if neutropenia_flag:
-        cn_lines.append(f"患者存在中性粒细胞/白细胞减少（严重度标注: {severity}）。这会增加感染风险，需采取饮食与食品安全的额外防护。")
-        en_lines.append(f"Patient shows neutropenia / low WBC (severity: {severity}). Infection risk is elevated — dietary precautions and food-safety measures are important.")
-        # Practical food guidance (specific to neutropenia)
+        cn_lines.append(f"患者存在中性粒细胞/白细胞减少（严重度: {severity}）。感染风险增加，请采取食品安全措施与饮食调整。")
+        en_lines.append(f"Patient shows neutropenia / low WBC (severity: {severity}). Infection risk is elevated — follow food-safety measures and specific dietary choices.")
         cn_lines.append("实务建议（中性粒细胞低）:")
         en_lines.append("Practical guidance (neutropenia):")
 
         cn_lines.extend([
-            "- 优先高质量熟蛋白（煮熟的鸡蛋、煮熟鱼、去皮鸡胸肉、豆腐、希腊优格）。",
-            "- 增加能产生短链脂肪酸（SCFA）的熟谷物与可溶性纤维，例如熟燕麦、熟糙米、熟香蕉与燕麦麸（每日适量1–2份）。",
-            "- 选择巴氏灭菌或高温处理过的乳制品，避免生食奶与生蛋食品。", 
-            "- 避免生海鲜、生菜沙拉、生芽菜、未彻底煮熟的肉类与街边未加热熟食。", 
-            "- 适量提供含锌与硒的食物（如一小把南瓜籽、少量巴西果），但避免过量补充（补充剂须先询问医生）。",
-            "- 多喝温开水，确保口腔卫生，若出现发烧立刻就医。"
+            "- 优先高质量熟蛋白（煮熟的鸡蛋、熟鱼、去皮鸡胸肉、豆腐、巴氏酸奶）。",
+            "- 增加熟谷物和可溶性纤维以支持短链脂肪酸（SCFA）产生：熟燕麦、熟糙米、熟香蕉、燕麦麸（每日1–2份）。",
+            "- 选择巴氏灭菌或经热处理的乳制品，避免生奶与生蛋制品。",
+            "- 避免生海鲜、生菜沙拉、生芽菜、未彻底煮熟的肉类与不明来源街边熟食。",
+            "- 适量摄入含锌/硒食物（如南瓜籽、小量巴西果），补剂须先询问医生。",
+            "- 保持口腔卫生与充足饮水，若出现发热请立即就医。"
         ])
         en_lines.extend([
-            "- Prioritise well-cooked high-quality proteins: hard-boiled/fully cooked eggs, cooked fish, skinless chicken breast, tofu, pasteurised yogurt.",
-            "- Increase cooked whole grains and soluble fiber that support SCFA (e.g., cooked oats, cooked brown rice, cooked banana, oat bran) — aim for modest servings (1–2 servings/day).",
-            "- Use pasteurised or heat-treated dairy; avoid raw milk/soft cheeses and raw-egg dishes.",
-            "- Avoid raw seafood, raw salads, raw sprouts, undercooked meats and street foods that are not reheated.",
-            "- Include zinc/selenium containing foods (small handful pumpkin seeds, small amount Brazil nuts) but avoid high-dose supplements without doctor approval.",
-            "- Maintain hydration and oral hygiene. If fever occurs, seek medical attention immediately."
+            "- Prioritise well-cooked, high-quality proteins: hard-boiled/fully cooked eggs, cooked fish, skinless chicken breast, tofu, pasteurised yogurt.",
+            "- Increase cooked whole grains and soluble fiber that support SCFA production: cooked oats, cooked brown rice, cooked banana, oat bran (modest servings 1–2/day).",
+            "- Use pasteurised or heat-treated dairy; avoid raw milk and raw-egg dishes.",
+            "- Avoid raw seafood, raw salads, raw sprouts, undercooked meats and uncertain street foods.",
+            "- Include zinc/selenium foods (pumpkin seeds, small amount Brazil nuts); consult physician before supplements.",
+            "- Maintain hydration and oral hygiene. Seek urgent care if fever occurs."
         ])
 
-        # Example specific nutrition rationale
         cn_lines.append("营养学理由:")
         en_lines.append("Nutritional rationale:")
-        cn_lines.append("- 熟谷物与可溶性纤维通过肠道细菌产生短链脂肪酸（SCFA），可支持肠道屏障与免疫功能。")
-        en_lines.append("- Cooked whole grains and soluble fiber support SCFA production by the gut microbiome, which helps gut barrier and immune resilience.")
+        cn_lines.append("- 熟谷物与可溶性纤维通过肠道菌群产生短链脂肪酸（SCFA），有助于肠道屏障与免疫功能。")
+        en_lines.append("- Cooked whole grains and soluble fiber feed the gut microbiome to produce SCFA, supporting gut barrier and immune resilience.")
 
-    # Additional rules: anemia, thrombocytopenia, glucose
     if hb is not None and hb < 12:
         cn_lines.append("贫血相关建议:")
         en_lines.append("Anemia-related suggestions:")
-        cn_lines.append("- 增加含铁与高质量蛋白的食物（瘦红肉、鸡肝适量、豆类、菠菜与南瓜籽），搭配维生素C（如蒸红椒或柑橘）以帮助吸收。")
-        en_lines.append("- Increase iron and high-quality protein sources (lean red meat, small amounts liver if approved, legumes, spinach, pumpkin seeds) paired with vitamin C to aid absorption.")
-        cn_lines.append("- 若为化疗相关贫血，请在医生建议下考虑铁剂或促红素治疗。")
-        en_lines.append("- For chemo-related anemia, discuss iron therapy or erythropoiesis support with physician.")
+        cn_lines.append("- 增加含铁与高质量蛋白的食物（瘦红肉、豆类、菠菜、南瓜籽），并搭配维生素C帮助吸收。")
+        en_lines.append("- Increase iron and quality protein sources (lean red meat, legumes, spinach, pumpkin seeds) paired with vitamin C.")
 
     if plt is not None and plt < 100:
-        cn_lines.append("血小板较低（出血风险）注意:")
+        cn_lines.append("血小板较低提示（出血风险）:")
         en_lines.append("Low platelets (bleeding risk) notes:")
-        cn_lines.append("- 避免硬脆、容易划伤牙龈的食物（如坚果粗碎直接咀嚼，需改为细磨或切小块）。")
-        en_lines.append("- Avoid hard, sharp foods that can injure oral mucosa; modify textures.")
+        cn_lines.append("- 避免硬脆或易划伤口腔的食物；将坚果等切碎或磨粉食用以降低创伤风险。")
+        en_lines.append("- Avoid hard, sharp foods; modify texture (chop or grind nuts).")
 
     if glu is not None:
         cn_lines.append("血糖注意:")
         en_lines.append("Glucose notes:")
         if glu > 7.0:
-            cn_lines.append("- 血糖偏高，推荐减少精制糖与含糖饮料，增加低升糖指数字食物（全谷、豆类、蔬菜）。")
-            en_lines.append("- Hyperglycaemia present: reduce refined sugars/drinks; prefer low-GI foods such as whole grains, legumes, vegetables.")
+            cn_lines.append("- 血糖偏高，减少精制糖與含糖饮料，优先全谷与蔬菜。")
+            en_lines.append("- Hyperglycaemia present: reduce refined sugars/drinks; prefer whole grains and vegetables.")
         else:
-            cn_lines.append("- 血糖在可接受范围，保持均衡碳水与蛋白质摄入以维持能量。")
+            cn_lines.append("- 血糖在可接受范围，保持均衡碳水與蛋白质摄入。")
             en_lines.append("- Glucose within acceptable range; maintain balanced carbs and protein.")
 
-    # Practical one-day sample (short)
-    cn_lines.append("示例一日餐单（供参考）:")
-    en_lines.append("Sample 1-day menu (for reference):")
-    cn_lines.append("- 早餐：熟燕麦粥 + 熟香蕉切片 + 一小把南瓜籽 + 巴氏酸奶。")
-    cn_lines.append("- 午餐：蒸熟鸡胸肉 + 熟糙米 + 蒸红萝卜 + 小份拌熟菠菜（加柠檬）。")
+    cn_lines.append("示例一日餐单（参考）:")
+    en_lines.append("Sample 1-day menu (reference):")
+    cn_lines.append("- 早餐：熟燕麦粥 + 熟香蕉切片 + 少量南瓜籽 + 巴氏酸奶。")
+    cn_lines.append("- 午餐：蒸鸡胸肉 + 熟糙米 + 蒸胡萝卜 + 熟菠菜。")
     cn_lines.append("- 晚餐：清蒸鱼 + 熟藜麦/糙米 + 蒸绿叶菜。")
-    cn_lines.append("- 小食：煮蛋一枚（全熟）、少量水果（熟苹果泥）。")
-    en_lines.append("- Breakfast: cooked oats + sliced cooked banana + small handful pumpkin seeds + pasteurised yogurt.")
-    en_lines.append("- Lunch: steamed chicken breast + cooked brown rice + steamed carrot + small serving cooked spinach with lemon.")
+    cn_lines.append("- 小食：全熟水煮蛋、少量熟水果泥。")
+    en_lines.append("- Breakfast: cooked oats + cooked banana + pumpkin seeds + pasteurised yogurt.")
+    en_lines.append("- Lunch: steamed chicken breast + cooked brown rice + steamed carrot + cooked spinach.")
     en_lines.append("- Dinner: steamed fish + cooked quinoa/brown rice + steamed greens.")
-    en_lines.append("- Snacks: hard-boiled egg (fully cooked), small portion cooked fruit compote.")
+    en_lines.append("- Snacks: hard-boiled egg, small portion cooked fruit compote.")
 
     cn_lines.append("重要警告:")
     en_lines.append("Important cautions:")
-    cn_lines.append("- 若患者处于严重免疫抑制或正接受化疗，请勿给任何未煮熟或生食，所有食材以彻底加热为主。")
-    cn_lines.append("- 在开始任何补剂（如高剂量锌、维生素D或抗氧化剂）前务必与主治医师确认，避免影响化疗或药物代谢。")
-    en_lines.append("- If severely immunosuppressed or on chemotherapy, avoid all raw/undercooked foods; heat everything thoroughly.")
-    en_lines.append("- Discuss supplements (high-dose zinc, vitamin D, antioxidants) with treating physician before starting.")
+    cn_lines.append("- 若患者处於严重免疫抑制或接受化疗，请避免所有生食与未煮熟食品，均以彻底加热为主。")
+    cn_lines.append("- 在开始任何补剂（如高剂量锌、维生素D或抗氧化剂）前务必与主治医师确认。")
+    en_lines.append("- If severely immunosuppressed or on chemotherapy, avoid all raw/undercooked foods; heat thoroughly.")
+    en_lines.append("- Discuss supplements (high-dose zinc, vitamin D, antioxidants) with the treating physician before starting.")
 
-    # Combine
     cn_text = "\n".join(cn_lines)
     en_text = "\n".join(en_lines)
     return {"cn": cn_text, "en": en_text, "flag": ("neutropenia" if neutropenia_flag else None)}
 
-# ===== Helper: robust section extractor (unchanged) =====
+# ===== Robust section extractor =====
 def extract_section(text, header):
     pattern = rf"{header}\s*[:\-]?\s*(.*?)(?=\n(?:Summary|Questions|Nutrition)\s*[:\-]|\Z)"
     m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
@@ -324,7 +277,7 @@ def extract_section(text, header):
             return m2.group(1).strip()
     return "No findings."
 
-# ===== Function: Twilio pre-check + send helper (unchanged) =====
+# ===== Twilio pre-check helper =====
 def twilio_send_with_precheck(client, from_, to, test_body, real_body):
     try:
         test_msg = client.messages.create(body=test_body, from_=from_, to=to)
@@ -345,14 +298,11 @@ if st.button("Generate Summary & Recommendations"):
         with st.spinner("Generating AI output..."):
             all_lab_text = input_source if input_source else "\n".join(lab_texts)
             health_index = compute_health_index_with_imaging(all_lab_text, image_texts)
-
-            # save to session_state early
             st.session_state['health_index'] = health_index
 
             st.subheader("📊 Health Index")
             st.write(f"Combined Health Index (0-100): {health_index}")
 
-            # GPT Prompt (more strict)
             prompt = f"""
 You are a clinical-support assistant. Given the patient's report text below, produce exactly three labelled sections: Summary, Questions, Nutrition.
 - Write "Summary:" then 3-4 short sentences in plain language.
@@ -363,7 +313,7 @@ If any section has no data to provide, write the section header and then "No fin
 Patient report:
 \"\"\"{all_lab_text}\"\"\"
 
-Output format (must include these headers exactly): 
+Output format (must include these headers exactly):
 Summary:
 - ...
 Questions:
@@ -383,12 +333,10 @@ Nutrition:
                 except Exception:
                     ai_text = resp["choices"][0]["message"]["content"] if "choices" in resp else str(resp)
 
-                # parse sections
                 summary = extract_section(ai_text, "Summary")
                 questions = extract_section(ai_text, "Questions")
                 nutrition = extract_section(ai_text, "Nutrition")
 
-                # normalize
                 if not summary or summary.strip() == "":
                     summary = "No findings."
                 if not questions or questions.strip() == "":
@@ -396,13 +344,11 @@ Nutrition:
                 if not nutrition or nutrition.strip() == "":
                     nutrition = "No findings."
 
-                # save to session_state
                 st.session_state['summary'] = summary
                 st.session_state['questions'] = questions
                 st.session_state['nutrition'] = nutrition
                 st.session_state['ai_raw'] = ai_text
 
-                # Display
                 st.subheader("🧾 Health Summary")
                 st.write(summary)
                 st.subheader("❓ Suggested Questions for the Doctor")
@@ -410,23 +356,21 @@ Nutrition:
                 st.subheader("🥗 Nutrition Recommendations")
                 st.write(nutrition)
 
-                # ===== New: Parse numeric labs and show Dietary Deep Dive if needed =====
+                # Parse labs and possibly show Dietary Deep Dive
                 labs = parse_lab_values(all_lab_text)
                 st.write("🔬 Parsed lab values (automated):", labs)
                 deep = generate_dietary_deep_dive(labs)
                 if deep.get("flag"):
-                    st.subheader("🧾 Dietary Deep Dive (targeted)")
-                    st.write("（系统检测到高风险指标，已展开更详细的饮食与食品安全建议）")
-                    # show both CN and EN with expanders
-                    with st.expander("中文 — 深度饮食建议 (可直接复制给家人)"):
-                        st.text_area("Copyable Chinese Deep Dive", value=deep['cn'], height=300)
-                    with st.expander("English — Dietary Deep Dive (copyable)"):
-                        st.text_area("Copyable English Deep Dive", value=deep['en'], height=300)
-                    # save into session_state for sending/emailing
+                    st.subheader("🍚 Dietary Deep Dive (targeted)")
+                    st.write("System detected risk flags; detailed dietary & food-safety guidance is below (copyable).")
+                    with st.expander("Chinese — Deep Dive (copyable)"):
+                        st.text_area("Chinese Deep Dive", value=deep['cn'], height=300)
+                    with st.expander("English — Deep Dive (copyable)"):
+                        st.text_area("English Deep Dive", value=deep['en'], height=300)
                     st.session_state['deep_cn'] = deep['cn']
                     st.session_state['deep_en'] = deep['en']
                 else:
-                    st.info("No immediate dietary deep-dive flags detected (e.g., neutropenia). You can still request more detailed dietary advice manually.")
+                    st.info("No immediate dietary deep-dive flags detected. You can request more detailed dietary advice manually.")
 
                 with st.expander("Full AI output (raw)"):
                     st.code(ai_text)
@@ -477,6 +421,7 @@ if twilio_client and st.button("Send Health Update to Family via WhatsApp (with 
                     st.write("1. On your phone, send the join code (shown in Twilio Console → Messaging → Try WhatsApp Sandbox) to +14155238886.")
                     st.write("2. Confirm you used the same WhatsApp account/phone number that is set as TWILIO_WHATSAPP_TO in secrets.")
                     st.write("3. After successful join confirmation message on your phone, re-run this Send action.")
+
 
 
 
