@@ -1,4 +1,3 @@
-# app.py - fully patched, Twilio removed, follow-up questions, email optional, all helpers included
 import streamlit as st
 import os
 import re
@@ -8,7 +7,8 @@ from pdf2image import convert_from_bytes
 import numpy as np
 import easyocr
 import smtplib
-from email.message import EmailMessage
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Initialize EasyOCR reader
 reader = easyocr.Reader(['en', 'ch_sim'], gpu=False)
@@ -16,10 +16,15 @@ reader = easyocr.Reader(['en', 'ch_sim'], gpu=False)
 # Streamlit config
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 st.title("AI-Driven Personalized Cancer Care Chatbot")
-st.write("Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get an English health summary, doctor questions, and dietitian-level nutrition advice.")
+st.write("Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get an English health summary, doctor questions, nutrition advice.")
 
 # OpenAI client setup
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = None
+try:
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+except Exception:
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 if not OPENAI_API_KEY:
     api_key_input = st.text_input("OpenAI API Key (session only):", type="password")
     if api_key_input:
@@ -42,7 +47,6 @@ def compute_health_index_smart(report_text):
             score -= 5
     return max(0, min(100, score))
 
-
 def compute_health_index_with_imaging(report_texts, image_reports_texts=None):
     lab_score = compute_health_index_smart(report_texts) if report_texts else 50
     image_score = 100
@@ -57,7 +61,6 @@ def compute_health_index_with_imaging(report_texts, image_reports_texts=None):
         image_score = max(0, min(100, image_score - deductions))
     combined = lab_score * 0.7 + image_score * 0.3
     return round(combined, 1)
-
 
 def parse_lab_values(text):
     if not text:
@@ -84,7 +87,7 @@ def parse_lab_values(text):
     raw_hb = find_one([r"hemoglobin[:\s]*([\d\.]+)", r"hgb[:\s]*([\d\.]+)"])
     raw_wbc = find_one([r"wbc[:\s]*([\d\.]+)", r"white blood cell[s]?:[:\s]*([\d\.]+)", r"wbc count[:\s]*([\d\.]+)"])
     raw_neut_abs = find_one([r"neutrophil[s]?\s*(?:absolute)?[:\s]*([\d\.]+)", r"neutrophil count[:\s]*([\d\.]+)"])
-    raw_neut_percent = find_one([r"neutrophil[s]?\s*%[:\s]*([\d\.]+)", r"neutrophil[s]?\s*percent[:\s]*([\d\.]+)"])
+    raw_neut_percent = find_one([r"neutrophil[s]?\s*%\s*[:\s]*([\d\.]+)", r"neutrophil[s]?\s*percent[:\s]*([\d\.]+)"])
     raw_plt = find_one([r"platelet[s]?:[:\s]*([\d\.]+)", r"plt[:\s]*([\d\.]+)"])
     raw_glu = find_one([r"glucose[:\s]*([\d\.]+)", r"fasting glucose[:\s]*([\d\.]+)"])
 
@@ -126,88 +129,105 @@ def parse_lab_values(text):
     results['glucose'] = raw_glu
     return results
 
+# File uploader
+uploaded_files = st.file_uploader(
+    label="Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt",
+    type=["jpg", "jpeg", "png", "pdf"],
+    accept_multiple_files=True
+)
 
-def generate_dietary_deep_dive_en(lab_vals):
-    lines = ["Clinical note & overview:"]
-    wbc_note = lab_vals.get('wbc_note')
-    neut_note = lab_vals.get('neut_note')
-    if wbc_note: lines.append(f"(Note: {wbc_note})")
-    if neut_note: lines.append(f"(Note: {neut_note})")
+# OCR extraction
+lab_texts = []
+image_texts = []
 
-    wbc = lab_vals.get('wbc_10e9_per_L') or lab_vals.get('wbc_raw')
-    neut = lab_vals.get('neutrophil_abs')
-    hb = lab_vals.get('hb_g_dl')
-    plt = lab_vals.get('plt')
-    glu = lab_vals.get('glucose')
-
-    neutropenia_flag = False
-    severity = None
-    if neut is not None:
-        if neut < 1.5:
-            neutropenia_flag = True
-            if neut < 0.5: severity = "severe"
-            elif neut < 1.0: severity = "moderate"
-            else: severity = "mild"
-    elif wbc is not None:
+if uploaded_files:
+    for uploaded_file in uploaded_files:
         try:
-            if float(wbc) < 3.0:
-                neutropenia_flag = True
-                severity = "possible (WBC low)"
-        except: pass
+            if uploaded_file.type.startswith("image"):
+                img = Image.open(uploaded_file).convert("RGB")
+                st.image(img, caption=f"Preview: {uploaded_file.name}", use_column_width=True)
+                ocr_result = "\n".join(reader.readtext(np.array(img), detail=0))
+            elif uploaded_file.type == "application/pdf":
+                pages = convert_from_bytes(uploaded_file.read())
+                ocr_result = ""
+                for page in pages:
+                    page_arr = np.array(page.convert("RGB"))
+                    ocr_result += "\n".join(reader.readtext(page_arr, detail=0)) + "\n"
+            else:
+                st.warning(f"{uploaded_file.name} is not a supported file type.")
+                continue
 
-    if neutropenia_flag:
-        lines.append(f"Patient shows neutropenia / low WBC (severity: {severity}). Follow food-safety measures.")
-        lines.append("Practical guidance (neutropenia):")
-        lines.extend([
-            "- Well-cooked high-quality proteins: eggs, cooked fish, chicken, tofu, pasteurised yogurt.",
-            "- Cooked whole grains and soluble fiber: oats, brown rice, banana, oat bran.",
-            "- Avoid raw milk, raw eggs, raw seafood, raw salads, raw sprouts, undercooked meats.",
-            "- Include zinc/selenium foods: pumpkin seeds, small amount Brazil nuts (consult physician for supplements).",
-            "- Maintain hydration and oral hygiene. Seek urgent care if fever occurs."
-        ])
+            fname_lower = uploaded_file.name.lower()
+            if any(k in fname_lower for k in ["pet", "ct", "xray", "scan"]):
+                image_texts.append(ocr_result)
+            else:
+                lab_texts.append(ocr_result)
+        except Exception as e:
+            st.error(f"OCR failed for {uploaded_file.name}: {e}")
 
-    if hb is not None and hb < 12:
-        lines.append("Anemia-related suggestions: Increase iron and quality protein sources paired with vitamin C.")
-    if plt is not None and plt < 100:
-        lines.append("Low platelets: avoid hard/sharp foods; modify texture.")
-    if glu is not None:
-        if glu > 7.0:
-            lines.append("Hyperglycaemia: reduce refined sugars; prefer whole grains and vegetables.")
+# Text area input
+text_input = st.text_area("Or paste a short lab/test excerpt here (English preferred)", height=160)
+input_source = text_input.strip() if text_input and text_input.strip() else None
 
-    lines.append("Sample 1-day menu (reference):")
-    lines.extend([
-        "- Breakfast: cooked oats + cooked banana + pumpkin seeds + pasteurised yogurt.",
-        "- Lunch: steamed chicken + brown rice + steamed carrot + cooked spinach.",
-        "- Dinner: steamed fish + quinoa/brown rice + steamed greens.",
-        "- Snacks: hard-boiled egg, small portion cooked fruit compote."
-    ])
-    lines.append("Important cautions: Avoid raw/undercooked foods if immunosuppressed. Consult physician before supplements.")
+# Main generate button
+if st.button("Generate Summary & Recommendations"):
+    all_lab_text = input_source if input_source else "\n".join(lab_texts)
+    if not all_lab_text:
+        st.error("Please paste a lab/test excerpt or upload files first.")
+    elif not client:
+        st.error("OpenAI client not configured. Please set OPENAI_API_KEY.")
+    else:
+        with st.spinner("Generating AI output..."):
+            health_index = compute_health_index_with_imaging(all_lab_text, image_texts)
+            st.subheader("Health Index")
+            st.write(f"Combined Health Index (0-100): {health_index}")
 
-    return "\n".join(lines), ("neutropenia" if neutropenia_flag else None)
+            prompt = f"""
+You are a clinical-support assistant. Respond only in English. Provide dietitian-level recommendations.
+Given the patient's report text below, produce exactly three labelled sections: Summary, Questions, Nutrition.
+Patient report:
+"""{all_lab_text}"""
 
+            try:
+                resp = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role":"user", "content": prompt}],
+                    max_tokens=700,
+                    temperature=0.2
+                )
+                ai_text = resp.choices[0].message.content
 
-def extract_section(text, header):
-    pattern = rf"{header}\s*[:\-]?\s*(.*?)(?=\n(?:Summary|Questions|Nutrition)\s*[:\-]|\Z)"
-    m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
-    if m: return m.group(1).strip()
-    variants = {
-        "Questions": [r"questions to ask", r"doctor questions", r"questions:", r"questions to ask the doctor", r"questions for doctor"],
-        "Summary": [r"summary", r"health summary", r"clinical summary"],
-        "Nutrition": [r"nutrition", r"recommendations", r"diet", r"nutrition recommendations"]
-    }
-    for v in variants.get(header, []):
-        m2 = re.search(rf"{v}\s*[:\-]?\s*(.*?)(?=\n(?:summary|questions|nutrition)\s*[:\-]|\Z)", text, flags=re.IGNORECASE | re.DOTALL)
-        if m2: return m2.group(1).strip()
-    return "No findings."
+                st.subheader("AI Output")
+                st.text_area("AI Output", value=ai_text, height=320)
 
-# UI: file upload and text input
-uploaded_files = st.file_uploader(...)
-# OCR processing remains as before
-# Generate Summary & Recommendations button code as before, using the helpers
-# Follow-up question code as before
-# Optional email send code as before
+                # Optional email sending
+                st.subheader("Send report via email (optional)")
+                recipient = st.text_input("Recipient email address")
+                if recipient:
+                    if st.button("Send Email Report"):
+                        sender_email = st.secrets.get("SENDER_EMAIL")
+                        sender_pass = st.secrets.get("SENDER_EMAIL_PASS")
+                        if sender_email and sender_pass:
+                            msg = MIMEMultipart()
+                            msg['From'] = sender_email
+                            msg['To'] = recipient
+                            msg['Subject'] = "AI Personalized Cancer Care Report"
+                            msg.attach(MIMEText(ai_text, 'plain'))
+                            try:
+                                server = smtplib.SMTP('smtp.gmail.com', 587)
+                                server.starttls()
+                                server.login(sender_email, sender_pass)
+                                server.send_message(msg)
+                                server.quit()
+                                st.success(f"Report sent to {recipient}")
+                            except Exception as e:
+                                st.error(f"Failed to send email: {e}")
+                        else:
+                            st.error("Email sender credentials not set in Streamlit Secrets.")
 
-# All the helper functions are now correctly defined before use, eliminating NameError.
+            except Exception as e:
+                st.error(f"OpenAI API call failed: {e}")
+
 
 
 
