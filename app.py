@@ -16,7 +16,7 @@ reader = easyocr.Reader(['en', 'ch_sim'], gpu=False)  # keep English-first OCR
 st.set_page_config(page_title="AI-Driven Personalized Cancer Care Chatbot", layout="centered")
 st.title("AI-Driven Personalized Cancer Care Chatbot")
 st.write(
-    "Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get an English health summary, doctor questions, nutrition advice and, when flagged, an English Dietary Deep Dive."
+    "Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get an English health summary, doctor questions, nutrition advice."
 )
 
 # OpenAI client setup (do NOT hardcode your key)
@@ -124,9 +124,9 @@ def parse_lab_values(text):
 
     def find_one(patterns):
         for p in patterns:
-            m = re.search(p, t, flags=re.IGNORECASE)
+            m = re.search(p, text, flags=re.IGNORECASE)
             if m:
-                for g in (1,2,3):
+                for g in range(1, m.lastindex + 1 if m.lastindex else 2):
                     try:
                         val = m.group(g)
                         if val:
@@ -138,17 +138,39 @@ def parse_lab_values(text):
                         continue
         return None
 
-    raw_hb = find_one([r"hemoglobin[:\s]*([\d\.]+)", r"hgb[:\s]*([\d\.]+)"])
-    raw_wbc = find_one([r"wbc[:\s]*([\d\.]+)", r"white blood cell[s]?:[:\s]*([\d\.]+)", r"wbc count[:\s]*([\d\.]+)"])
-    raw_neut_abs = find_one([r"neutrophil[s]?\s*(?:absolute)?[:\s]*([\d\.]+)", r"neutrophil count[:\s]*([\d\.]+)"])
-    raw_neut_percent = find_one([r"neutrophil[s]?\s*%\s*[:\s]*([\d\.]+)", r"neutrophil[s]?\s*percent[:\s]*([\d\.]+)"])
-    raw_plt = find_one([r"platelet[s]?:[:\s]*([\d\.]+)", r"plt[:\s]*([\d\.]+)"])
-    raw_glu = find_one([r"glucose[:\s]*([\d\.]+)", r"fasting glucose[:\s]*([\d\.]+)"])
+    # expanded patterns to capture common lab formats and units
+    raw_hb = find_one([
+        r"\b(?:hb|hgb)[:\s]*([-+]?\d*\.?\d+)\s*(?:g/dl|g per dl|gdl)?",
+        r"hemoglobin[:\s]*([-+]?\d*\.?\d+)\s*(?:g/dl)?"
+    ])
+    raw_wbc = find_one([
+        r"\bwbc[:\s]*([-+]?\d*\.?\d+)\s*(?:x10\^9/l|10\^9/l|x10e9/l|/µl|/ul|per microliter)?",
+        r"white blood cell[s]?:[:\s]*([-+]?\d*\.?\d+)\s*(?:/µl|/ul|per microliter|x10\^9/l)?",
+        r"wbc count[:\s]*([-+]?\d*\.?\d+)"
+    ])
+    raw_neut_abs = find_one([
+        r"neutrophil[s]?\s*(?:absolute)?[:\s]*([-+]?\d*\.?\d+)\s*(?:x10\^9/l|/µl|/ul)?",
+        r"neutrophil[s]?\s*absolute[:\s]*([-+]?\d*\.?\d+)"
+    ])
+    raw_neut_percent = find_one([
+        r"neutrophil[s]?\s*%[:\s]*([-+]?\d*\.?\d+)%?",
+        r"neutrophil[s]?\s*percent[:\s]*([-+]?\d*\.?\d+)%?",
+        r"neut%[:\s]*([-+]?\d*\.?\d+)"
+    ])
+    raw_plt = find_one([
+        r"platelet[s]?:[:\s]*([-+]?\d*\.?\d+)\s*(?:10\^9/l|/µl|/ul)?",
+        r"plt[:\s]*([-+]?\d*\.?\d+)"
+    ])
+    raw_glu = find_one([
+        r"glucose[:\s]*([-+]?\d*\.?\d+)\s*(?:mmol/l|mg/dl)?",
+        r"fasting glucose[:\s]*([-+]?\d*\.?\d+)"
+    ])
 
     wbc_10e9 = None
     wbc_note = None
     if raw_wbc is not None:
-        if raw_wbc > 1000 or raw_wbc > 50:
+        # numbers >50 are almost certainly reported in cells/µL (eg 9000), convert to x10^9/L
+        if raw_wbc > 50:
             wbc_10e9 = raw_wbc / 1000.0
             wbc_note = f"converted from {raw_wbc} (assumed cells/µL) to {wbc_10e9:.2f} x10^9/L"
         else:
@@ -158,7 +180,7 @@ def parse_lab_values(text):
     neut_abs = None
     neut_note = None
     if raw_neut_abs is not None:
-        if raw_neut_abs > 1000 or raw_neut_abs > 50:
+        if raw_neut_abs > 50:
             neut_abs = raw_neut_abs / 1000.0
             neut_note = f"converted from {raw_neut_abs} to {neut_abs:.2f} x10^9/L"
         else:
@@ -171,16 +193,16 @@ def parse_lab_values(text):
         except:
             neut_abs = None
 
-    results['hb_g_dl'] = raw_hb
-    results['wbc_raw'] = raw_wbc
+    results['hb_g_dl'] = round(raw_hb, 2) if raw_hb is not None else None
+    results['wbc_raw'] = round(raw_wbc, 2) if raw_wbc is not None else None
     results['wbc_10e9_per_L'] = round(wbc_10e9, 2) if wbc_10e9 is not None else None
     results['wbc_note'] = wbc_note
-    results['neutrophil_abs_raw'] = raw_neut_abs
+    results['neutrophil_abs_raw'] = round(raw_neut_abs, 2) if raw_neut_abs is not None else None
     results['neutrophil_abs'] = round(neut_abs, 2) if neut_abs is not None else None
     results['neut_note'] = neut_note
-    results['neut_percent_raw'] = raw_neut_percent
-    results['plt'] = raw_plt
-    results['glucose'] = raw_glu
+    results['neut_percent_raw'] = round(raw_neut_percent, 2) if raw_neut_percent is not None else None
+    results['plt'] = round(raw_plt, 2) if raw_plt is not None else None
+    results['glucose'] = round(raw_glu, 2) if raw_glu is not None else None
     return results
 
 # Dietary deep dive generator - English only
@@ -280,6 +302,10 @@ def extract_section(text, header):
 
 # Main button logic: call OpenAI (English-only prompt)
 if st.button("Generate Summary & Recommendations"):
+    # clear stale session state to avoid showing old ai_raw or deep dives
+    for k in ['summary', 'questions', 'nutrition', 'ai_raw', 'deep_en', 'health_index']:
+        st.session_state.pop(k, None)
+
     if not input_source and not lab_texts:
         st.error("Please paste a lab/test excerpt or upload OCR-compatible files first.")
     elif not client:
@@ -302,7 +328,7 @@ Given the patient's report text below, produce exactly three labelled sections: 
 If any section has no data, write the header and then "No findings.".
 
 Patient report:
-\"\"\"{all_lab_text}\"\"\"
+"""{all_lab_text}"""
 
 Required output headers (exactly): 
 Summary:
@@ -348,10 +374,15 @@ Nutrition:
 
                 # Parse labs and show English Dietary Deep Dive when flagged
                 labs = parse_lab_values(all_lab_text)
-                st.write("Parsed lab values (automated):", labs)
+
+                # sanitize and present parsed labs clearly
+                clean = {k: (v if v is not None else "N/A") for k, v in labs.items()}
+                st.subheader("Parsed lab values (automated)")
+                st.json(clean)
+
                 deep_text, flag = generate_dietary_deep_dive_en(labs)
                 if flag:
-                    st.subheader("Dietary Deep Dive (English, copyable)")
+                    st.subheader("Dietitian-style Dietary Deep Dive (English, copyable)")
                     st.text_area("Dietary Deep Dive (English)", value=deep_text, height=320)
                     st.session_state['deep_en'] = deep_text
                 else:
@@ -405,6 +436,7 @@ if twilio_client and st.button("Send Health Update via WhatsApp (with pre-check)
                     else:
                         st.write("Exception:", repr(detail))
                     st.info("If you see an error about 'number not joined', send the join code to +14155238886 from your WhatsApp to connect sandbox.")
+
 
 
 
