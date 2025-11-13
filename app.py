@@ -7,7 +7,7 @@ import requests
 
 # Page configuration
 st.set_page_config(
-    page_title="AI Cancer Care Assistant",
+    page_title="AI-Driven Personalized Cancer Care Chatbot",
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -75,7 +75,7 @@ def handle_user_message(user_input):
                        for msg in st.session_state.conversation]
             
             response = openai.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5-mini",
                 messages=messages
             )
             ai_reply = response.choices[0].message.content
