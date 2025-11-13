@@ -1,125 +1,117 @@
 import streamlit as st
-import os
 import openai
 import easyocr
 import numpy as np
 from PIL import Image
-import requests
+import io
+import smtplib
+from email.message import EmailMessage
 
-# ------------------ SECRETS ------------------
-openai.api_key = st.secrets["OPENAI_API_KEY"]
+# ---- Secrets ----
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MAILGUN_API_KEY = st.secrets["MAILGUN_API_KEY"]
 MAILGUN_DOMAIN = st.secrets["MAILGUN_DOMAIN"]
-EMAIL_SENDER = f"postmaster@{MAILGUN_DOMAIN}"
+EMAIL_SENDER = st.secrets["EMAIL_SENDER"]
 
-# ------------------ SESSION STATE ------------------
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+openai.api_key = OPENAI_API_KEY
 
-# ------------------ OCR FUNCTION ------------------
-reader = easyocr.Reader(['en'])
-def ocr_extract(uploaded_files):
+# ---- OCR ----
+reader = easyocr.Reader(['en'], gpu=False)
+
+def ocr_extract(files):
     texts = []
-    for file in uploaded_files:
-        img = Image.open(file)
+    for uploaded_file in files:
+        img = Image.open(uploaded_file)
         texts.append(" ".join(reader.readtext(np.array(img), detail=0)))
     return "\n".join(texts)
 
-# ------------------ AI FUNCTION ------------------
-def generate_ai_response(prompt):
-    messages = [{"role": "user", "content": prompt}]
+# ---- AI Response ----
+def generate_ai_response(prompt, conversation=None):
+    messages = []
+    if conversation:
+        messages = conversation
+    messages.append({"role": "user", "content": prompt})
     response = openai.ChatCompletion.create(
         model="gpt-5-mini",
         messages=messages,
         temperature=0.7
     )
-    return response['choices'][0]['message']['content']
+    content = response['choices'][0]['message']['content']
+    messages.append({"role": "assistant", "content": content})
+    return content, messages
 
-# ------------------ UI ------------------
+# ---- Email Sending via Mailgun SMTP ----
+def send_email(to_email, subject, body):
+    msg = EmailMessage()
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    msg.set_content(body)
+    
+    smtp_host = "smtp.mailgun.org"
+    smtp_port = 587
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(f"postmaster@{MAILGUN_DOMAIN}", MAILGUN_API_KEY)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        st.error(f"Failed to send email: {e}")
+        return False
+
+# ---- Streamlit Layout ----
+st.set_page_config(layout="wide")
 st.title("AI-Driven Personalized Cancer Care Chatbot")
 
 uploaded_files = st.file_uploader(
-    "Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get an English health summary, doctor questions, dietary advice.",
-    type=["jpg","png","pdf"],
-    accept_multiple_files=True
+    "Upload medical reports (JPG/PNG/PDF) or paste a short lab/test excerpt. Click Generate to get an English health summary, doctor questions, dietary advice",
+    type=['png', 'jpg', 'jpeg', 'pdf'], accept_multiple_files=True
 )
 
-user_input = st.text_area("Or paste lab/report excerpt here:")
+conversation = st.session_state.get("conversation", [])
 
-# ------------------ GENERATE BUTTON ------------------
-if st.button("Generate Summary & Advice"):
-    ocr_text = ocr_extract(uploaded_files) if uploaded_files else user_input
-    if not ocr_text.strip():
-        st.warning("Please upload or paste lab/report data first.")
-    else:
-        prompt = f"""Please generate a concise health summary, suggested questions for the doctor, 
-        and a structured dietitian-level dietary advice based on the following lab/report text:\n{ocr_text}"""
+if uploaded_files:
+    with st.container():
+        st.subheader("Uploaded Document Preview")
+        for f in uploaded_files:
+            if f.type.startswith("image/"):
+                st.image(f, use_column_width=True)
+            else:
+                st.text(f.name)
+                
+    if st.button("Generate Summary & Dietary Advice"):
+        ocr_text = ocr_extract(uploaded_files)
+        prompt = f"Please generate a concise health summary, suggested questions for the doctor, and a structured dietitian-level dietary advice based on the following lab/report text:\n{ocr_text}"
+        ai_response, conversation = generate_ai_response(prompt, conversation)
+        st.session_state.conversation = conversation
+        st.subheader("AI Chat Flow")
+        for msg in conversation:
+            if msg['role'] == 'user':
+                st.markdown(f"**You:** {msg['content']}")
+            else:
+                st.markdown(f"**AI:** {msg['content']}")
         
-        ai_response = generate_ai_response(prompt)
-        st.session_state.chat_history.append({"role":"AI","content": ai_response})
-
-# ------------------ FOLLOW-UP ------------------
-followup = st.text_input("Ask follow-up / refine dietary advice or doctor questions:")
+st.subheader("Ask follow-up / Refine Advice")
+followup_input = st.text_area("Ask follow-up question about dietary advice or doctor questions:", "")
 if st.button("Send Follow-up"):
-    if followup.strip():
-        followup_prompt = f"""Refine the previous AI report based on this follow-up question:\n{followup}\n
-        Previous report:\n{st.session_state.chat_history[-1]['content']}"""
-        ai_followup = generate_ai_response(followup_prompt)
-        st.session_state.chat_history.append({"role":"User","content": followup})
-        st.session_state.chat_history.append({"role":"AI","content": ai_followup})
-
-# ------------------ CHAT / A4 REPORT ------------------
-st.subheader("AI Health Report (A4 Layout Preview)")
-if st.session_state.chat_history:
-    report_container = st.container()
-    with report_container:
-        st.markdown(
-            """
-            <div style="
-                width: 800px; 
-                min-height: 1123px;  
-                padding: 40px;
-                border: 1px solid #ccc;
-                margin: auto;
-                font-family: Arial, sans-serif;
-                line-height: 1.5;
-                background-color: #fff;
-            ">
-            """, unsafe_allow_html=True
-        )
-        for chat in st.session_state.chat_history:
-            if chat["role"] == "AI":
-                st.markdown(f"<p><b>AI:</b> {chat['content']}</p>", unsafe_allow_html=True)
+    if followup_input:
+        ai_response, conversation = generate_ai_response(followup_input, conversation)
+        st.session_state.conversation = conversation
+        st.subheader("Updated Chat Flow")
+        for msg in conversation:
+            if msg['role'] == 'user':
+                st.markdown(f"**You:** {msg['content']}")
             else:
-                st.markdown(f"<p><b>You:</b> {chat['content']}</p>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown(f"**AI:** {msg['content']}")
 
-# ------------------ EMAIL ------------------
-st.subheader("Send Report via Email (Optional)")
-recipient_email = st.text_input("Recipient Email:")
+st.subheader("Email Summary (Optional)")
+to_email = st.text_input("Recipient email")
 if st.button("Send Email"):
-    if recipient_email.strip() and st.session_state.chat_history:
-        try:
-            import requests
-            data = {
-                "from": EMAIL_SENDER,
-                "to": recipient_email,
-                "subject": "AI Health Report",
-                "text": "\n\n".join([c['content'] for c in st.session_state.chat_history if c['role']=='AI'])
-            }
-            response = requests.post(
-                f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
-                auth=("api", MAILGUN_API_KEY),
-                data=data
-            )
-            if response.status_code == 200:
-                st.success("Email sent successfully!")
-            else:
-                st.error(f"Failed to send email: {response.text}")
-        except Exception as e:
-            st.error(f"Failed to send email: {e}")
-    else:
-        st.warning("Provide recipient email and generate report first.")
+    if to_email and conversation:
+        body = "\n\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in conversation])
+        send_email(to_email, "Your AI Health Summary & Dietary Advice", body)
+
 
 
 
