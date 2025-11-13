@@ -3,18 +3,20 @@ import numpy as np
 import easyocr
 from PIL import Image
 import openai
+import requests
 
 # Load secrets
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+MAILGUN_API_KEY = st.secrets["MAILGUN_API_KEY"]
+MAILGUN_DOMAIN = st.secrets["MAILGUN_DOMAIN"]
+EMAIL_SENDER = f"postmaster@{MAILGUN_DOMAIN}"
+
 openai.api_key = OPENAI_API_KEY
 reader = easyocr.Reader(['en'])
 
 # Chat session state
 if "conversation" not in st.session_state:
     st.session_state.conversation = []
-
-if "ocr_text" not in st.session_state:
-    st.session_state.ocr_text = ""
 
 st.title("AI-Driven Personalized Cancer Care Chatbot")
 
@@ -23,31 +25,25 @@ uploaded_files = st.file_uploader(
     "Upload medical documents (PDF or images):", type=['pdf','png','jpg','jpeg'], accept_multiple_files=True
 )
 
+ocr_text = ""
 if uploaded_files:
     st.subheader("Uploaded Document Preview")
-    combined_text = []
     for uploaded_file in uploaded_files:
         try:
             img = Image.open(uploaded_file)
             st.image(img, use_column_width=True)
-            text = " ".join(reader.readtext(np.array(img), detail=0))
-            if text:
-                combined_text.append(text)
+            ocr_text += " ".join(reader.readtext(np.array(img), detail=0)) + "\n"
         except Exception as e:
             st.error(f"Failed to process {uploaded_file.name}: {e}")
-    if combined_text:
-        st.session_state.ocr_text = "\n\n".join(combined_text)
-        st.success("Document text extracted. You can generate a summary below.")
 
 # Generate summary & advice
 if st.button("Generate Summary & Dietary Advice"):
-    if not st.session_state.ocr_text:
+    if not ocr_text:
         st.warning("Please upload at least one document first.")
     else:
         prompt = (
             f"Please generate a concise health summary, suggested questions for the doctor, "
-            f"and a structured, dietitian-level dietary advice (with 1-day sample menu) "
-            f"based on the following lab/report text:\n\n{st.session_state.ocr_text}"
+            f"and a structured, dietitian-level dietary advice (with 1-day sample menu) based on the following lab/report text:\n\n{ocr_text}"
         )
         with st.spinner("AI is generating summary and dietary advice..."):
             try:
@@ -56,17 +52,18 @@ if st.button("Generate Summary & Dietary Advice"):
                     messages=[{"role": "user", "content": prompt}]
                 )
                 ai_output = response.choices[0].message.content
-                # Add as first AI message
+                # Add AI summary as the first conversation message
                 st.session_state.conversation.append({"role": "assistant", "content": ai_output})
             except Exception as e:
                 st.error(f"AI generation failed: {e}")
 
-# Chat input at bottom
+# Chat input
 st.subheader("Chat with AI to refine dietary advice or doctor questions")
-chat_input = st.text_area("Type a follow-up or refinement and press Send:", "", height=100)
+chat_input = st.text_area("Your message:", "")
 if st.button("Send Message"):
-    if chat_input.strip():
+    if chat_input.strip() != "":
         st.session_state.conversation.append({"role": "user", "content": chat_input})
+        # Generate AI response
         with st.spinner("AI is thinking..."):
             try:
                 response = openai.chat.completions.create(
@@ -78,8 +75,7 @@ if st.button("Send Message"):
             except Exception as e:
                 st.error(f"AI follow-up generation failed: {e}")
 
-# Display chat history: AI left, user right
-st.markdown("---")
+# Display chat history: AI left, User right
 for msg in st.session_state.conversation:
     if msg["role"] == "assistant":
         colL, colR = st.columns([0.7, 0.3])
@@ -96,15 +92,30 @@ for msg in st.session_state.conversation:
             st.markdown("**You:**")
             st.write(msg["content"])
 
-# Download full conversation
-if st.session_state.conversation:
-    full_conversation = "\n\n".join([f"{m['role'].upper()}:\n{m['content']}" for m in st.session_state.conversation])
-    st.download_button(
-        "Download Full Conversation (txt)",
-        data=full_conversation,
-        file_name="conversation.txt",
-        mime="text/plain"
-    )
+# Optional: send final report via Mailgun
+st.subheader("Send Report via Email (Optional)")
+email_to = st.text_input("Recipient Email")
+if st.button("Send Email"):
+    if not email_to:
+        st.warning("Please provide a recipient email address.")
+    else:
+        try:
+            final_report = "\n\n".join([f"{m['role'].upper()}:\n{m['content']}" for m in st.session_state.conversation])
+            response = requests.post(
+                f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
+                auth=("api", MAILGUN_API_KEY),
+                data={"from": EMAIL_SENDER,
+                      "to": [email_to],
+                      "subject": "Your Personalized Health Report",
+                      "text": final_report}
+            )
+            if response.status_code in (200, 202):
+                st.success(f"Email successfully sent to {email_to}")
+            else:
+                st.error(f"Failed to send email: {response.text}")
+        except Exception as e:
+            st.error(f"Email sending error: {e}")
+
 
 
 
