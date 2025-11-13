@@ -7,7 +7,7 @@ import requests
 
 # Page configuration
 st.set_page_config(
-    page_title="AI-Driven Personalized Cancer Care Chatbot",
+    page_title="AI Cancer Care Assistant",
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -29,6 +29,8 @@ if "ocr_text" not in st.session_state:
     st.session_state.ocr_text = ""
 if "processing_complete" not in st.session_state:
     st.session_state.processing_complete = False
+if "user_email" not in st.session_state:
+    st.session_state.user_email = ""
 
 # Functions
 def generate_analysis():
@@ -37,16 +39,16 @@ def generate_analysis():
         try:
             prompt = f"""Based on the following medical report content, please provide:
 1. Concise health summary
-2. Suggested questions for the doctor
-3. Professional dietary advice (including 1-day sample menu)
+2. 5 suggested questions for your cardiologist/primary doctor (limit to 5 questions maximum)
+3. Professional dietitian advice based on health report
 
 Medical report content:
 {st.session_state.ocr_text}
 
-Please respond in a professional, caring manner."""
+Please respond in a professional, caring manner. Keep the questions limited to 5 maximum to avoid overwhelming the patient."""
 
             response = openai.chat.completions.create(
-                model="gpt-5-mini",
+                model="gpt-4o",  # Using GPT-4o for better performance
                 messages=[{"role": "user", "content": prompt}]
             )
             ai_output = response.choices[0].message.content
@@ -73,7 +75,7 @@ def handle_user_message(user_input):
                        for msg in st.session_state.conversation]
             
             response = openai.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="gpt-4o",
                 messages=messages
             )
             ai_reply = response.choices[0].message.content
@@ -82,6 +84,56 @@ def handle_user_message(user_input):
             
         except Exception as e:
             st.error(f"❌ Failed to generate response: {e}")
+
+def send_email_via_mailgun():
+    """Send conversation via Mailgun email"""
+    if not st.session_state.user_email:
+        st.error("❌ Please enter your email address first")
+        return False
+    
+    try:
+        # Format conversation for email
+        email_content = "Cancer Care Assistant Conversation Summary\n\n"
+        email_content += "=" * 50 + "\n\n"
+        
+        for msg in st.session_state.conversation:
+            if msg["role"] == "user":
+                email_content += f"YOU: {msg['content']}\n\n"
+            else:
+                email_content += f"AI ASSISTANT: {msg['content']}\n\n"
+            email_content += "-" * 30 + "\n\n"
+        
+        # Mailgun API request
+        response = requests.post(
+            f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
+            auth=("api", MAILGUN_API_KEY),
+            data={
+                "from": f"Cancer Care Assistant <{EMAIL_SENDER}>",
+                "to": [st.session_state.user_email],
+                "subject": "Your Cancer Care Assistant Conversation Summary",
+                "text": email_content
+            }
+        )
+        
+        if response.status_code == 200:
+            st.success(f"✅ Conversation sent to {st.session_state.user_email} successfully!")
+            return True
+        else:
+            st.error(f"❌ Failed to send email: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        st.error(f"❌ Email sending failed: {e}")
+        return False
+
+# Suggested questions for quick buttons
+SUGGESTED_QUESTIONS = [
+    "Can you explain my test results in simple terms?",
+    "What are the most important lifestyle changes I should make?",
+    "What symptoms should I monitor and report to my doctor?",
+    "Are there any foods or supplements I should avoid?",
+    "When should I schedule my next follow-up appointment?"
+]
 
 # Main title
 st.title("🏥 AI-Driven Personalized Cancer Care Assistant")
@@ -119,7 +171,7 @@ with left_col:
                     st.error(f"Failed to process {uploaded_file.name}: {e}")
         
         # Primary action button
-        if st.button("🎯 Generate Health Analysis & Dietary Advice", 
+        if st.button("🎯 Generate Health Analysis & Recommendations", 
                     type="primary", 
                     use_container_width=True):
             if not st.session_state.ocr_text.strip():
@@ -145,30 +197,33 @@ with right_col:
                 with st.chat_message("assistant", avatar="🤖"):
                     st.markdown(msg["content"])
                     
-                    # Quick action buttons for initial analysis
+                    # Suggested questions quick buttons
                     if msg.get("type") == "initial_analysis":
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            if st.button("📋 Detailed Meal Plan", key=f"meal_{i}"):
-                                st.session_state.conversation.append({
-                                    "role": "user", 
-                                    "content": "Can you provide a more detailed weekly meal plan?"
-                                })
-                                st.rerun()
-                        with col2:
-                            if st.button("💊 Medication Questions", key=f"med_{i}"):
-                                st.session_state.conversation.append({
-                                    "role": "user", 
-                                    "content": "What medication-related questions should I ask my doctor based on my condition?"
-                                })
-                                st.rerun()
-                        with col3:
-                            if st.button("🏥 Follow-up Prep", key=f"followup_{i}"):
-                                st.session_state.conversation.append({
-                                    "role": "user", 
-                                    "content": "What should I prepare for my next doctor's appointment? Which indicators should I monitor?"
-                                })
-                                st.rerun()
+                        st.markdown("---")
+                        st.markdown("**💡 Suggested questions you might want to ask:**")
+                        
+                        # Create 2 columns for better button layout
+                        col1, col2 = st.columns(2)
+                        
+                        buttons_per_col = (len(SUGGESTED_QUESTIONS) + 1) // 2
+                        
+                        for idx, question in enumerate(SUGGESTED_QUESTIONS):
+                            if idx < buttons_per_col:
+                                with col1:
+                                    if st.button(f"❓ {question}", key=f"q_{idx}", use_container_width=True):
+                                        st.session_state.conversation.append({
+                                            "role": "user", 
+                                            "content": question
+                                        })
+                                        st.rerun()
+                            else:
+                                with col2:
+                                    if st.button(f"❓ {question}", key=f"q_{idx}", use_container_width=True):
+                                        st.session_state.conversation.append({
+                                            "role": "user", 
+                                            "content": question
+                                        })
+                                        st.rerun()
     
     # Chat input - only show after initial analysis
     if st.session_state.processing_complete:
@@ -187,8 +242,17 @@ with footer_col1:
             del st.session_state[key]
         st.rerun()
 with footer_col2:
-    if st.button("💾 Save Conversation", use_container_width=True):
-        st.info("Save feature under development...")
+    # Email input and send button
+    email_col1, email_col2 = st.columns([2, 1])
+    with email_col1:
+        st.session_state.user_email = st.text_input(
+            "Email for summary:",
+            placeholder="your.email@example.com",
+            key="email_input"
+        )
+    with email_col2:
+        if st.button("📧 Send Summary", use_container_width=True):
+            send_email_via_mailgun()
 with footer_col3:
     st.markdown("🔒 **Privacy Protected** | Your data is only used for this session")
 
@@ -211,6 +275,13 @@ with st.sidebar:
     - Always follow doctor's advice
     - Protect your privacy information
     """)
+    
+    # Display conversation stats
+    if st.session_state.conversation:
+        st.markdown("---")
+        user_msgs = len([msg for msg in st.session_state.conversation if msg["role"] == "user"])
+        assistant_msgs = len([msg for msg in st.session_state.conversation if msg["role"] == "assistant"])
+        st.metric("Conversation Length", f"{user_msgs} user · {assistant_msgs} AI")
 
 
 
