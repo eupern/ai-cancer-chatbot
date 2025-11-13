@@ -81,29 +81,7 @@ for msg in st.session_state.conversation:
     else:
         st.markdown(f"**AI:** {msg['content']}")
 
-# Optional: send final report via Mailgun
-st.subheader("Send Report via Email (Optional)")
-email_to = st.text_input("Recipient Email")
-if st.button("Send Email"):
-    if not email_to:
-        st.warning("Please provide a recipient email address.")
-    else:
-        try:
-            final_report = "\n\n".join([f"{m['role'].upper()}:\n{m['content']}" for m in st.session_state.conversation])
-            response = requests.post(
-                f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
-                auth=("api", MAILGUN_API_KEY),
-                data={"from": EMAIL_SENDER,
-                      "to": [email_to],
-                      "subject": "Your Personalized Health Report",
-                      "text": final_report}
-            )
-            if response.status_code == 200:
-                st.success(f"Email successfully sent to {email_to}")
-            else:
-                st.error(f"Failed to send email: {response.text}")
-        except Exception as e:
-            st.error(f"Email sending error: {e}")
+
 
 
 
