@@ -5,8 +5,8 @@ from PIL import Image
 import openai
 import smtplib
 import ssl
-from email.mime.text import MimeText
-from email.mime.multipart import MimeMultipart
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
 # Page configuration
@@ -51,7 +51,7 @@ Medical report content:
 Please respond in a professional, caring manner. Keep the questions limited to 5 maximum to avoid overwhelming the patient."""
 
             response = openai.chat.completions.create(
-                model="gpt-5-mini",  # Using GPT-4o (most current model)
+                model="gpt-5-mini",  # Using gpt-5-mini (most current model)
                 messages=[{"role": "user", "content": prompt}]
             )
             ai_output = response.choices[0].message.content
@@ -120,12 +120,12 @@ Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                 email_content += f"AI ASSISTANT (Message {i+1}):\n{msg['content']}\n\n"
             email_content += "----------------------------------------\n\n"
         
-        # Create message
-        message = MimeMultipart()
+        # Create message - FIXED IMPORTS
+        message = MIMEMultipart()
         message["From"] = f"Cancer Care Assistant <{sender_email}>"
         message["To"] = st.session_state.user_email
         message["Subject"] = "Your Cancer Care Assistant Conversation Summary"
-        message.attach(MimeText(email_content, "plain"))
+        message.attach(MIMEText(email_content, "plain"))
         
         # Send email
         context = ssl.create_default_context()
@@ -160,7 +160,7 @@ def handle_suggested_question(question):
                        for msg in st.session_state.conversation]
             
             response = openai.chat.completions.create(
-                model="gpt-5-mini",  # Using GPT-4o (most current model)
+                model="gpt-4o",  # Using GPT-4o (most current model)
                 messages=messages
             )
             ai_reply = response.choices[0].message.content
