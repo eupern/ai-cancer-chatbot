@@ -52,12 +52,11 @@ if st.button("Generate Summary & Dietary Advice"):
                     messages=[{"role": "user", "content": prompt}]
                 )
                 ai_output = response.choices[0].message.content
-                # Add AI summary as the first conversation message
                 st.session_state.conversation.append({"role": "assistant", "content": ai_output})
             except Exception as e:
                 st.error(f"AI generation failed: {e}")
 
-# Chat input
+# Show conversation/chat
 st.subheader("Chat with AI to refine dietary advice or doctor questions")
 chat_input = st.text_area("Your message:", "")
 if st.button("Send Message"):
@@ -75,22 +74,12 @@ if st.button("Send Message"):
             except Exception as e:
                 st.error(f"AI follow-up generation failed: {e}")
 
-# Display chat history: AI left, User right
+# Display chat history
 for msg in st.session_state.conversation:
-    if msg["role"] == "assistant":
-        colL, colR = st.columns([0.7, 0.3])
-        with colL:
-            st.markdown("**AI:**")
-            st.info(msg["content"])
-        with colR:
-            st.write("")
+    if msg["role"] == "user":
+        st.markdown(f"**You:** {msg['content']}")
     else:
-        colL, colR = st.columns([0.3, 0.7])
-        with colL:
-            st.write("")
-        with colR:
-            st.markdown("**You:**")
-            st.write(msg["content"])
+        st.markdown(f"**AI:** {msg['content']}")
 
 # Optional: send final report via Mailgun
 st.subheader("Send Report via Email (Optional)")
@@ -109,12 +98,13 @@ if st.button("Send Email"):
                       "subject": "Your Personalized Health Report",
                       "text": final_report}
             )
-            if response.status_code in (200, 202):
+            if response.status_code == 200:
                 st.success(f"Email successfully sent to {email_to}")
             else:
                 st.error(f"Failed to send email: {response.text}")
         except Exception as e:
             st.error(f"Email sending error: {e}")
+
 
 
 
