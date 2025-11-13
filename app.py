@@ -75,7 +75,53 @@ with col2:
         st.download_button("Download summary (txt)", st.session_state.generated_summary, file_name="summary.txt")
 
 # --- Chat section (left: AI, right: User) ---
-st.subheader("Chat with AI t
+st.subheader("Chat with AI to refine dietary advice or doctor questions")
+
+# Display chat history
+chat_area = st.container()
+with chat_area:
+    for msg in st.session_state.conversation:
+        if msg['role'] == 'assistant':
+            colL, colR = st.columns([0.7, 0.3])
+            with colL:
+                st.markdown("**AI**")
+                st.info(msg['content'])
+            with colR:
+                st.write("")
+        else:
+            colL, colR = st.columns([0.3, 0.7])
+            with colL:
+                st.write("")
+            with colR:
+                st.markdown("**You**")
+                st.write(msg['content'])
+
+# Input box at the bottom
+chat_input = st.text_area("Type a follow-up or refinement and press Send:", "", height=100)
+if st.button("Send Message"):
+    if chat_input.strip() != "":
+        st.session_state.conversation.append({"role": "user", "content": chat_input.strip()})
+        messages = [{"role": m["role"], "content": m["content"]} for m in st.session_state.conversation]
+        with st.spinner("AI is thinking..."):
+            try:
+                response = openai.chat.completions.create(
+                    model="gpt-5-mini",
+                    messages=messages,
+                    max_tokens=500
+                )
+                ai_reply = response.choices[0].message.content.strip()
+                st.session_state.conversation.append({"role": "assistant", "content": ai_reply})
+            except Exception as e:
+                st.error(f"AI follow-up generation failed: {e}")
+
+# --- Export last assistant message and full conversation ---
+st.subheader("Export / Share Conversation")
+if st.session_state.conversation:
+    last_ai = next((m["content"] for m in reversed(st.session_state.conversation) if m["role"]=="assistant"), "")
+    st.text_area("Last AI message (copy & share):", last_ai, height=150)
+    full_text = "\n\n".join([f"{m['role'].upper()}:\n{m['content']}" for m in st.session_state.conversation])
+    st.download_button("Download full conversation (txt)", full_text, file_name="full_conversation.txt")
+
 
 
 
