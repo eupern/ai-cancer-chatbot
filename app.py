@@ -3,16 +3,18 @@ import numpy as np
 import easyocr
 from PIL import Image
 import openai
-import requests
 
 # Load secrets
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-MAILGUN_API_KEY = st.secrets.get("MAILGUN_API_KEY", "")
-MAILGUN_DOMAIN = st.secrets.get("MAILGUN_DOMAIN", "")
-EMAIL_SENDER = f"postmaster@{MAILGUN_DOMAIN}" if MAILGUN_DOMAIN else None
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
+# Mailgun removed per user request — email functionality replaced with copy/export options
 
 openai.api_key = OPENAI_API_KEY
-reader = easyocr.Reader(['en'])
+
+@st.cache_resource
+def get_reader():
+    return easyocr.Reader(['en'])
+
+reader = get_reader()
 
 # Initialize session state
 if "conversation" not in st.session_state:
@@ -45,7 +47,9 @@ with st.expander("Upload medical documents (PDF or images)", expanded=True):
                 st.error(f"Failed to process {uploaded_file.name}: {e}")
 
         if combined_text:
-            st.session_state.ocr_text = "\n\n".join(combined_text)
+            st.session_state.ocr_text = "
+
+".join(combined_text)
             st.success("Document text extracted. You can generate a summary below.")
 
 # --- Generate summary and structured dietary advice ---
@@ -58,7 +62,9 @@ with col1:
         else:
             prompt = (
                 "Please generate a concise health summary (2-4 short paragraphs), a short list of suggested questions for the doctor (bullet points), "
-                "and a structured, dietitian-level dietary advice with one-day sample menu. Use plain, actionable language. Base the answer only on the text below.\n\n" + st.session_state.ocr_text
+                "and a structured, dietitian-level dietary advice with one-day sample menu. Use plain, actionable language. Base the answer only on the text below.
+
+" + st.session_state.ocr_text
             )
             with st.spinner("AI is generating summary and dietary advice..."):
                 try:
@@ -82,13 +88,35 @@ with col2:
             pass
 
 # --- Chat section (left: AI, right: User style) ---
-st.subheader("Chat with AI to refine dietary advice or doctor questions")
-chat_input = st.text_area("Your message:", "", height=100)
+st.subheader("Chat — refine advice or ask follow-up questions
+Type a follow-up or refinement and press Send:")
 
+# Display conversation first (so input is at the bottom)
+chat_area = st.container()
+with chat_area:
+    for msg in st.session_state.conversation:
+        if msg['role'] == 'assistant':
+            colL, colR = st.columns([0.7, 0.3])
+            with colL:
+                st.markdown("**AI**")
+                st.info(msg['content'])
+            with colR:
+                st.write("")
+        else:
+            colL, colR = st.columns([0.3, 0.7])
+            with colL:
+                st.write("")
+            with colR:
+                st.markdown("**You**")
+                st.write(msg['content'])
+
+# --- Input area placed after conversation so it's always at the bottom ---
+chat_input = st.text_area("", "", height=120, key="chat_input")
 if st.button("Send Message"):
     if chat_input.strip() != "":
-        # Append user message
+        # Append user message and clear input
         st.session_state.conversation.append({"role": "user", "content": chat_input.strip()})
+        st.session_state.chat_input = ""
         # Build messages for the model from conversation
         messages = []
         for msg in st.session_state.conversation:
@@ -109,77 +137,38 @@ if st.button("Send Message"):
             except Exception as e:
                 st.error(f"AI follow-up generation failed: {e}")
 
-# Custom visual chat display: AI messages left, User messages right
 st.markdown("---")
-chat_area = st.container()
-with chat_area:
-    for msg in st.session_state.conversation:
-        if msg['role'] == 'assistant':
-            colL, colR = st.columns([0.7, 0.3])
-            with colL:
-                st.markdown(f"**AI**")
-                st.info(msg['content'])
-            with colR:
-                st.write("")
-        else:
-            colL, colR = st.columns([0.3, 0.7])
-            with colL:
-                st.write("")
-            with colR:
-                st.markdown(f"**You**")
-                st.write(msg['content'])
 
-# --- Mail flow: send only assistant-generated report or full conversation ---
-st.subheader("Send Report via Email (Optional)")
-email_to = st.text_input("Recipient Email")
-send_mode = st.radio("Report content", ["Assistant-only summary (recommended)", "Full conversation"], index=0)
+# --- Export / copy options (replaced email) ---
+st.subheader("Share / Export")
+if st.session_state.conversation:
+    # show last assistant message for easy copy
+    last_assistant = ""
+    for m in reversed(st.session_state.conversation):
+        if m['role'] == 'assistant':
+            last_assistant = m['content']
+            break
 
-if st.button("Send Email"):
-    if not email_to:
-        st.warning("Please provide a recipient email address.")
-    elif not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
-        st.error("Mailgun settings missing in Streamlit secrets. Please add MAILGUN_API_KEY and MAILGUN_DOMAIN.")
-    else:
-        try:
-            if send_mode == "Assistant-only summary (recommended)":
-                if not st.session_state.generated_summary:
-                    st.warning("No assistant summary available — generate one first.")
-                else:
-                    body_text = st.session_state.generated_summary
-                    subject = "Personalized Health Summary and Dietary Advice"
-            else:
-                # Full conversation
-                final_report = []
-                for m in st.session_state.conversation:
-                    final_report.append(f"{m['role'].upper()}:\n{m['content']}")
-                body_text = "\n\n".join(final_report)
-                subject = "Full AI-Patient Conversation Export"
+    st.write("Last assistant message (you can copy & paste to share):")
+    st.text_area("Copy-ready summary", value=last_assistant, height=200)
 
-            if body_text:
-                resp = requests.post(
-                    f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
-                    auth=("api", MAILGUN_API_KEY),
-                    data={
-                        "from": EMAIL_SENDER,
-                        "to": [email_to],
-                        "subject": subject,
-                        "text": body_text
-                    }
-                )
-                if resp.status_code in (200, 202):
-                    st.success(f"Email successfully sent to {email_to}")
-                else:
-                    st.error(f"Failed to send email: {resp.status_code} {resp.text}")
-        except Exception as e:
-            st.error(f"Email sending error: {e}")
+    # Download full conversation option
+    final_report = []
+    for m in st.session_state.conversation:
+        final_report.append(f"{m['role'].upper()}:
+{m['content']}")
+    full_text = "
 
-# --- Helpful notes and quick actions ---
+".join(final_report)
+    st.download_button("Download full conversation (txt)", full_text, file_name="conversation.txt")
+
 with st.expander("Helpful actions / notes", expanded=False):
-    st.write("• Generate the assistant summary first, then use the Assistant-only email mode to send a concise report to clinicians or family.")
-    st.write("• Use the chat box to refine the AI's suggested doctor questions or dietary plan. Each Send will append to the conversation and prompt the AI for a follow-up reply.")
+    st.write("• Generate the assistant summary first, then use the copy box or download button to share with family or clinicians.")
+    st.write("• The chat input is intentionally placed below the conversation so new messages are always added from the bottom.")
     st.write("• If OCR is poor for PDFs, try exporting pages as PNG/JPEG and re-uploading.")
 
 # End of file
+
 
 
 
